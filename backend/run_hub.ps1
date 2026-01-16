@@ -1,28 +1,28 @@
-cd backend
+# RELiSH Hub - Quick Start Script
+# Save as: backend/run_hub.ps1
+#
+# Usage:
+#   ./run_hub.ps1                    # Use localhost (testing on same machine)
+#   ./run_hub.ps1 192.168.1.100      # Use LAN IP (Quest on same network)
+#   ./run_hub.ps1 https://xyz.ngrok-free.app  # Use dev tunnel
 
-# Option 1: Localhost testing (same machine)
-./run_hub.ps1
+param(
+    [string]$BaseUrl = ""
+)
 
-# Option 2: LAN testing (Quest on same network)
-# First, find your PC's LAN IP: ipconfig | findstr IPv4
-./run_hub.ps1 http://192.168.1.100:8000
+Write-Host "======================================" -ForegroundColor Cyan
+Write-Host "RELiSH MR Hub - Starting..." -ForegroundColor Cyan
+Write-Host "======================================" -ForegroundColor Cyan
 
-# Option 3: Dev tunnel (for HTTPS, required for WebRTC on LAN)
-# First: Install ngrok or similar, then:
-./run_hub.ps1 https://abc123.ngrok-free.app
-```
+# Set base URL if provided
+if ($BaseUrl -ne "") {
+    Write-Host "Base URL: $BaseUrl" -ForegroundColor Yellow
+    $env:RELISH_BASE_URL = $BaseUrl
+} else {
+    Write-Host "Base URL: (will use request URL)" -ForegroundColor Yellow
+}
 
-**Expected output:**
-```
-======================================
-RELiSH MR Hub - Starting...
-======================================
-Base URL: (will use request URL)
+Write-Host ""
 
-============================================================
-RELiSH MR Hub - Phase 1
-============================================================
-Version: 0.1.0
-Docs:    http://localhost:8000/docs
-============================================================
-INFO:     Uvicorn running on http://0.0.0.0:8000
+# Run with conda (more robust than 'conda activate' in scripts)
+conda run -n relish-hub --no-capture-output uvicorn app:app --host 0.0.0.0 --port 8000 --reload
