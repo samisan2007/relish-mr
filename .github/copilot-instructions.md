@@ -14,16 +14,20 @@
 - **Mentor client** (Web browser): Joins session via URL, sends/receives WebRTC audio only (no MR, no vision)
 - **Hub** (FastAPI, single-process): Sessions, WebRTC signaling relay, ASR ingest, compiler (transcripts → suggestions), logging
 
-**Audio flow (Phase 1 default):** 
-Mentor speaks → WebRTC to Quest → Quest forwards decoded PCM → Hub ASR → Transcript → Compiler → Suggestions → Quest renders MR
+**Audio flow (Phase 1 default):**
+Mentor speaks → Browser Web Audio API captures PCM → WebSocket to Hub → VAD + ASR → Transcript → Compiler → Suggestions → Quest renders MR
+(WebRTC runs in parallel for the live call so cook hears mentor immediately; ASR runs independently on the browser-streamed PCM)
 
 ### Key Architectural Decisions
 
 1. **One hub process** – Phase 1 keeps services simple; Vision (RAM/SAM3) is Phase 2+ in separate envs
-2. **Suggestions not commands** – System proposes; cook decides (accept/dismiss/edit)
-3. **Quest-forwarded PCM** – Not mentor browser streaming (mentor browser fallback only if needed)
+2. **Suggestions not commands** – System proposes; cook decides (accept/dismiss/edit); no auto overlays in Phase 1
+3. **Browser-direct PCM for ASR** – Mentor browser streams raw PCM to hub via Web Audio API + WebSocket. Not Quest-forwarded (that was the old default; inverted because browser path is simpler, higher quality, and independent of Quest state)
 4. **Session lifecycle in-memory** – Sessions not resumable; cleanup on disconnect/timeout/explicit end
 5. **Graceful degradation** – If ASR/compiler fails, call continues; hub logs errors, no crash
+6. **Suggestion delta protocol** – `instruction_suggestions` adds new items; `suggestion_update` patches in place; `suggestion_remove` removes. Quest never replaces its full suggestion list — prevents flicker/reorder
+7. **ASR in thread executor** – Whisper (faster-whisper) is CPU-bound; always run via `run_in_executor` to avoid blocking the asyncio event loop
+8. **TURN required for remote testing** – STUN alone fails under NAT; add TURN before any user study where mentor is off-LAN
 
 ### Expected Latency Profile
 
@@ -34,10 +38,13 @@ Speech → MR suggestion: **~2.6 seconds** (2.0s ASR buffer + 0.5s ASR + 0.1s ne
 - **[SPEC.md](SPEC.md)** – Single source of truth for Phase 1 architecture, routes, message contracts, audio format, session lifecycle, latency expectations
 - **[FUTURE.md](FUTURE.md)** – Phase 2+ vision grounding (RAM/SAM3 setup notes); not blocking Phase 1
 - **[README.md](README.md)** – Quickstart, testing, smoke tests
-- **`relish-hub/`** – FastAPI hub (empty in repo; you implement server, routes, ASR, compiler, logging)
-- **`services/ram/recognize-anything/`** – Phase 2+ vision grounding scaffold (batch_inference.py, finetune.py, models)
-- **`unity/Relish_MR/`** – Unity 6 Quest project (Assets, Scenes, plugins)
-- **`mentor-ui/`**, **`shared/`** – Mentor web interface & shared schema (currently minimal/stub)
+- **`backend/`** – FastAPI hub — implement WS routes, ASR (faster-whisper), compiler (Claude Haiku), logging here
+  - `backend/app.py` – hub skeleton (REST routes done; WS routes and pipeline not yet implemented)
+  - `backend/static/join.html` – mentor web UI (to be created: WebRTC + Web Audio API PCM streaming)
+- **`unity/`** – Unity 6 Quest 3 project (to be created)
+- **`services/ram/recognize-anything/`** – Phase 2+ vision grounding (RAM library cloned; weights not yet downloaded)
+- **`services/sam3/`** – Phase 2+ segmentation stub (empty)
+- **`shared/`** – Message schema (JSON Schema for hub ↔ client contract; to be populated)
 
 ## Critical Developer Workflows
 
@@ -79,7 +86,7 @@ GET http://localhost:8000/health
 ### Three WS Routes
 - **`/ws/signal/{session_id}/{role}`** – WebRTC signaling (offer/answer/ICE) relay only
 - **`/ws/events/{session_id}/{client}`** – JSON messages (transcripts, suggestions, session events)
-- **`/ws/audio/{session_id}/{speaker}`** – Binary PCM frames (16kHz, mono int16 preferred; hub downmixes from 48kHz if needed)
+- **`/ws/audio/{session_id}/{speaker}`** – Binary PCM frames; `speaker=mentor` fed by browser Web Audio API; `speaker=cook` optionally fed by Quest
 
 ### Message Envelope (All JSON)
 ```json
@@ -88,15 +95,17 @@ GET http://localhost:8000/health
 
 **Key events:**
 - `transcript_final` – Hub → Cook (emit suggestions only from this, not partials)
-- `instruction_suggestions` – Hub → Cook (list of task/timer/check items)
+- `instruction_suggestions` – Hub → Cook (ADD new suggestion items only; append to pending list)
+- `suggestion_update` – Hub → Cook (PATCH existing suggestion in place by ID)
+- `suggestion_remove` – Hub → Cook (REMOVE suggestion from UI by ID)
 - `participant_joined` / `participant_left` – Session notifications
 - `session_end` – Cook → Hub (explicit cleanup trigger)
 
 ### Audio Format
 - **Preferred:** 16 kHz, mono, PCM int16
-- **Accepted:** 48 kHz, mono/stereo, int16 (hub downmixes to 16kHz mono)
-- **Chunking:** ~20–50ms frames, no batching (low-latency priority)
-- **Quest buffering:** 2–5s before ASR, drop oldest frames on network congestion
+- **Accepted:** 48 kHz, mono/stereo, int16 (hub downmixes to 16kHz mono before ASR)
+- **Chunking:** VAD-based utterance chunking (not fixed 2–5s buffer); flush on end-of-speech (500ms silence), hard cap 10s
+- **ASR:** faster-whisper `base` model (default); always run in `asyncio.run_in_executor` — never block the event loop
 
 ## Session Lifecycle & Cleanup
 
@@ -134,11 +143,13 @@ GET http://localhost:8000/health
 ## Quick Debugging & Tips
 
 - **Hub won't connect?** Check port 8000; verify `--host 0.0.0.0` for network access
-- **WebRTC no audio?** Verify signaling messages (offer/answer/ICE) flow correctly via hub; test in Insomnia
-- **Suggestions don't appear?** Check `transcript_final` is firing (not just partials); verify compiler runs without error
-- **PCM forwarding lag?** Expect ~2.6s end-to-end (2s buffer + 0.5s ASR); normal
+- **WebRTC no audio?** Verify signaling messages (offer/answer/ICE) flow correctly via hub; check TURN config for off-LAN testing
+- **Suggestions don't appear?** Check `transcript_final` is firing; verify faster-whisper is running in executor (not blocking event loop); verify compiler returns valid JSON
+- **Compiler returns garbage?** Ensure structured output (tool use / JSON mode) is configured — never parse free-form LLM text
+- **Suggestion list flickers/reorders?** Verify Quest appends on `instruction_suggestions`, patches on `suggestion_update`, removes on `suggestion_remove` — never replaces full list
+- **ASR hub lag?** VAD-based chunking means latency scales with utterance length; typical ~1.5s utterance + 500ms silence = ~2s before ASR starts. This is expected.
 - **Session cleanup hangs?** Check for lingering WebSocket connections; verify timeout logic fires
-- **Mentor browser mic perms?** HTTPS required (except localhost); use mkcert for LAN testing
+- **Mentor browser mic perms?** HTTPS required (except localhost); use mkcert for LAN testing; check AudioWorklet vs ScriptProcessorNode compatibility
 
 ## References
 
