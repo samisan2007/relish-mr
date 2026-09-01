@@ -1,0 +1,25 @@
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+
+# Local-only content
+Documentation/
+Test Data/
+
+# Model weights — SAM 3 lives in the Hugging Face cache (~/.cache/huggingface),
+# outside the repo. These patterns are a guard against any local copy.
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+
+# Media / run outputs
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Generated overlays from test runs
+*_sam3.png
