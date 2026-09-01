@@ -52,6 +52,22 @@ def load_frames(video_path: str | Path, max_frames: int = 150, stride: int = 3) 
     return frames, src_fps / stride
 
 
+def _to_instances(processed: dict) -> list[Instance]:
+    """Processor output -> Instance list, keeping the track id."""
+    return [
+        Instance(
+            mask=mask.cpu().numpy().astype(bool),
+            box_xyxy=tuple(float(v) for v in box),
+            score=float(score),
+            obj_id=int(obj_id),
+        )
+        for mask, box, score, obj_id in zip(
+            processed["masks"], processed["boxes"],
+            processed["scores"], processed["object_ids"],
+        )
+    ]
+
+
 def open_writer(path: str | Path, fps: float):
     """H.264 writer. OpenCV's mp4v output won't play in a browser; ffmpeg's H.264 will."""
     return imageio.get_writer(str(path), fps=fps, codec="libx264", quality=8,
@@ -70,6 +86,35 @@ class Sam3VideoTracker:
     @property
     def device(self) -> str:
         return str(self.model.device)
+
+    def start_stream(self, text: str):
+        """Open a session for live frames (webcam). Returns the session to feed track_frame().
+
+        Streaming disables the hotstart heuristics that prune duplicate and
+        unmatched tracks, since those need future frames — expect more false
+        positives than the offline `track()` path.
+        """
+        session = self.processor.init_video_session(
+            inference_device=self.model.device,
+            processing_device="cpu",
+            video_storage_device="cpu",
+        )
+        self.processor.add_text_prompt(session, text)
+        return session
+
+    def track_frame(self, session, frame: np.ndarray) -> tuple[list[Instance], float]:
+        """Track one live RGB frame. Identities carry over from earlier frames."""
+        t0 = time.perf_counter()
+        inputs = self.processor(images=frame, device=self.model.device, return_tensors="pt")
+        inputs = inputs.to(self.model.device)
+        with torch.no_grad():
+            outputs = self.model(inference_session=session, frame=inputs.pixel_values[0])
+        processed = self.processor.postprocess_outputs(
+            session, outputs, original_sizes=inputs.original_sizes
+        )
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return _to_instances(processed), (time.perf_counter() - t0) * 1000
 
     def track(self, frames: list[np.ndarray], text: str):
         """Yield a FrameResult per frame. Object IDs are stable across the clip.
@@ -92,21 +137,9 @@ class Sam3VideoTracker:
                 torch.cuda.synchronize()
             inference_ms = (time.perf_counter() - t0) * 1000
 
-            instances = [
-                Instance(
-                    mask=mask.cpu().numpy().astype(bool),
-                    box_xyxy=tuple(float(v) for v in box),
-                    score=float(score),
-                    obj_id=int(obj_id),
-                )
-                for mask, box, score, obj_id in zip(
-                    processed["masks"], processed["boxes"],
-                    processed["scores"], processed["object_ids"],
-                )
-            ]
             yield FrameResult(
                 frame_idx=outputs.frame_idx,
                 image=Image.fromarray(frames[outputs.frame_idx]),
-                instances=instances,
+                instances=_to_instances(processed),
                 inference_ms=inference_ms,
             )

@@ -50,6 +50,14 @@ Tracks every instance of the concept through the clip, keeping stable IDs:
 (default 150) — decoded frames are held in RAM, so a full 1408x1408 video would
 otherwise need several GB. Writes `<video>_<prompt>.mp4` next to the source.
 
+Or use the UI (`run_sam_vid.cmd` from the repo root), which has two tabs:
+
+- **Video file** — the offline path above, better quality.
+- **Webcam (live)** — streaming inference, measured at **~1.4 fps** (roughly
+  700ms/frame at 640x480) on an RTX 3080. Enter a prompt, press Start. Streaming
+  disables the heuristics that prune duplicate tracks, so expect more false
+  positives than the file tab.
+
 First ever run downloads ~3.5 GB of model weights to the Hugging Face cache.
 
 ## Layout
@@ -62,7 +70,8 @@ First ever run downloads ~3.5 GB of model weights to the Hugging Face cache.
 | `test_sam3.py` | CLI smoke test wiring the above together |
 | `sweep.py` | Runs a set of prompts over `Test Data/`, saves overlays to `Test Data/results/` |
 | `ui.py` | Gradio tester — image + prompt + threshold, see the mask |
-| `video_runner.py` | Video tracking (`Sam3VideoModel`) — text prompt → masks with stable object IDs |
+| `video_runner.py` | Video tracking (`Sam3VideoModel`) — offline `track()` and live `track_frame()` |
 | `track_video.py` | CLI: track a concept through a video, write an annotated `.mp4` |
+| `video_ui.py` | Gradio video tracker — "Video file" and "Webcam (live)" tabs |
 
 Work is logged in `../Documentation/devlog.md`.
