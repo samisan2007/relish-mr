@@ -10,7 +10,7 @@ A context-aware Mixed Reality cooking assistant where:
 
 - **Cook** wears Quest 3 and cooks with an MR layer (task board, timers, checks).
 - **Mentor** joins via a **simple web link** and has a **natural two-way conversation** with the cook (like a phone call).
-- The system transcribes the conversation and produces MR guidance as auto-overlays (high-confidence) plus suggestion cards (tasks/timers/checks).
+- The system transcribes the conversation and produces MR guidance as suggestion cards (tasks/timers/checks) on the task board.
 - The cook stays in control: **accept / dismiss / edit** suggestions.
 
 ## What this is not (Phase 1 non-goals)
@@ -29,17 +29,30 @@ You can run a demo where:
 4. Quest renders MR suggestions and supports accept/dismiss/edit.
 5. Hub logs transcripts, suggestions, and cook actions.
 
-## Repo structure (recommended)
+## Repo structure
 
-- `backend/` — FastAPI hub (session + WS routes + ASR + compiler + logging)
-- `unity/` — Unity 6 Quest project
-- `docs/` — technical spec + logging + future scope
+```
+relish-mr/
+├── backend/           # FastAPI hub — sessions, WS routes, ASR, compiler, logging
+│   ├── app.py
+│   ├── run_hub.ps1
+│   ├── static/
+│   │   └── join.html  # Mentor web UI (WebRTC + PCM streaming)
+│   └── logs/          # JSONL session logs
+├── unity/             # Unity 6 Quest 3 project (to be created)
+├── services/
+│   ├── ram/           # Phase 2+ — RAM vision model (recognize-anything cloned)
+│   └── sam3/          # Phase 2+ — SAM3 segmentation (stub)
+├── shared/            # Message schema (JSON Schema for hub ↔ client contract)
+├── SPEC.md            # Single source of truth for Phase 1 architecture
+├── FUTURE.md          # Phase 2+ vision grounding notes
+└── README.md
+```
 
 Docs:
 
-- `docs/SPEC.md` — the single source of truth for Phase 1 architecture, routes, messages, audio format, flows
-- `docs/LOGGING.md` — what gets recorded and how
-- `docs/FUTURE.md` — Phase 2+ notes (vision grounding, RAM/SAM3 setup work)
+- `SPEC.md` — single source of truth for Phase 1 architecture, routes, messages, audio format, flows
+- `FUTURE.md` — Phase 2+ notes (vision grounding, RAM/SAM3 setup work)
 
 ---
 
@@ -58,8 +71,10 @@ pip install fastapi uvicorn[standard] websockets pydantic
 Run:
 
 ```powershell
-uvicorn app:app--host0.0.0.0--port8000--reload
-
+cd backend
+.\run_hub.ps1
+# or directly:
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 Check:
@@ -92,7 +107,7 @@ Use Insomnia for:
 - Sending synthetic events (fake suggestions) to validate MR UI rendering
 - Observing transcript/suggestion traffic
 
-The exact WS routes and message formats are defined in `docs/SPEC.md`.
+The exact WS routes and message formats are defined in `SPEC.md`.
 
 ---
 
@@ -101,7 +116,7 @@ The exact WS routes and message formats are defined in `docs/SPEC.md`.
 - Hub: `GET /health` returns 200.
 - WebSocket: connect to events channel and receive a test event.
 - Quest UI: render a fake suggestion list; verify accept/dismiss/edit work.
-- Quest forwarding: Quest sends PCM (forwarded remote mentor WebRTC audio) to /ws/audio/{session}/mentor; hub reports bytes received.
+- Browser PCM: mentor browser streams PCM to `/ws/audio/{session}/mentor`; hub reports bytes received.
 - ASR: speaking a known sentence produces `transcript_final`.
 - Compiler: transcript “Dice onions and sauté 10 minutes” yields an action + a 600s timer suggestion.
 - Fallback: if compiler output is invalid, hub emits transcript-only (no crash).
@@ -116,12 +131,12 @@ The exact WS routes and message formats are defined in `docs/SPEC.md`.
 - **Suggestions not commands** (system proposes; cook decides).
 - **MR-first UX** (calm task board + timers; minimal interruptions).
 - **Defer on uncertainty** (ask the cook or keep as an ungrounded card).
-- **Auto overlays for high-confidence cues** (cook can remove/edit/disable); cards for the rest.
+- **Cards only in Phase 1** (no auto overlays; cook decides on every suggestion). Auto overlays are Phase 2.
 
 ## Decisions
 
 - Mentor is audio-only and non-instrumented by default (no MR view, no UI controls).
 - Phase 1 uses one FastAPI hub process (no microservices in the critical path).
-- WebRTC is used for the two-way call; the Quest forwards the received mentor audio as PCM-over-WebSocket for ASR (mentor PCM streaming is fallback only).
+- WebRTC is used for the two-way call. Mentor browser streams PCM directly to the hub for ASR (not via Quest). Quest optionally streams cook mic PCM for full dialogue context.
 - The system outputs suggestions, not commands; the cook accepts/edits/dismisses.
 - Vision grounding is Phase 2+ and must never block the Phase 1 MR experience.
