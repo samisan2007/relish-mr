@@ -1,0 +1,17 @@
+# Perception (SAM 3) dependencies.
+# Python 3.12 venv required — PyTorch CUDA wheels don't support the system Python 3.14.
+#
+# torch and torchvision are installed separately from the PyTorch CUDA index (see README),
+# not from this file, because the right wheel depends on the local CUDA driver version.
+
+transformers>=4.56
+accelerate
+kernels
+huggingface_hub[cli]
+numpy
+pillow
+opencv-python
+imageio
+imageio-ffmpeg
+gradio
+requests
