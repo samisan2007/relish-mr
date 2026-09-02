@@ -21,14 +21,23 @@ from PIL import Image
 from bench_realtime import CONFIGS
 from video_runner import Sam3VideoTracker, load_frames, open_writer
 from viz import draw_instances
+from yoloe_runner import HybridVideoTracker, YoloeVideoTracker
 
 print("Loading SAM 3 video model...")
 tracker = Sam3VideoTracker()
 print(f"Ready on {tracker.device} ({tracker.load_seconds:.1f}s)")
 
-# Webcam tab: one extra model may be cached alongside `tracker` so switching between the
-# baseline config and one alternate is instant; switching to a different alternate reloads.
+MODEL_SAM3 = "SAM3"
+MODEL_YOLOE = "YOLOE (text prompt)"
+MODEL_HYBRID = "Hybrid (SAM3 seed -> YOLOE track)"
+MODEL_CHOICES = [MODEL_SAM3, MODEL_YOLOE, MODEL_HYBRID]
+
+# Webcam tab: one extra SAM3 config may be cached alongside `tracker` so switching between
+# the baseline and one alternate is instant; switching to a different alternate reloads.
+# YOLOE/Hybrid each load once and stay cached — they don't have SAM3's precision configs.
 _bench_cache: dict[str, Sam3VideoTracker] = {}
+_yoloe_tracker: YoloeVideoTracker | None = None
+_hybrid_tracker: HybridVideoTracker | None = None
 
 
 def get_bench_tracker(config_name: str) -> Sam3VideoTracker:
@@ -48,6 +57,27 @@ def get_bench_tracker(config_name: str) -> Sam3VideoTracker:
             compile_model=cfg.compile_model,
         )
     return _bench_cache[config_name]
+
+
+def get_active_tracker(model_choice: str, config_name: str):
+    """Returns (tracker, label) for whichever backend is selected. label goes in the
+    status line and run log so entries stay distinguishable across all three backends."""
+    global _yoloe_tracker, _hybrid_tracker
+
+    if model_choice == MODEL_YOLOE:
+        if _yoloe_tracker is None:
+            print("Loading YOLOE...")
+            _yoloe_tracker = YoloeVideoTracker()
+        return _yoloe_tracker, MODEL_YOLOE
+
+    if model_choice == MODEL_HYBRID:
+        if _hybrid_tracker is None:
+            print("Loading Hybrid (YOLOE side; SAM3 side reuses the baseline model)...")
+            _hybrid_tracker = HybridVideoTracker(sam3_tracker=tracker)
+        return _hybrid_tracker, MODEL_HYBRID
+
+    cam_tracker = get_bench_tracker(config_name)
+    return cam_tracker, f"SAM3: {config_name}"
 
 
 def run_file(video_path, prompt, max_frames, stride, show_masks, show_boxes,
@@ -91,7 +121,7 @@ def run_file(video_path, prompt, max_frames, stride, show_masks, show_boxes,
     ])
 
 
-def webcam_loop(prompt, show_masks, show_boxes, camera_index, config_name, run_state):
+def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, config_name, run_state):
     """Grab frames from the local camera and yield annotated ones, until cancelled.
 
     Capture happens server-side (OpenCV) rather than in the browser, so the feed
@@ -108,9 +138,9 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, config_name, run_s
         return
 
     try:
-        cam_tracker = get_bench_tracker(config_name)
+        cam_tracker, label = get_active_tracker(model_choice, config_name)
     except Exception as e:
-        yield None, f"Failed to load config '{config_name}': {e}", run_state
+        yield None, f"Failed to load '{model_choice}': {e}", run_state
         return
 
     capture = cv2.VideoCapture(int(camera_index), cv2.CAP_DSHOW)
@@ -122,7 +152,7 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, config_name, run_s
         return
 
     session = cam_tracker.start_stream(prompt.strip())
-    run_state = {"config": config_name, "prompt": prompt.strip(), "times": [], "counts": [], "ids": set()}
+    run_state = {"label": label, "prompt": prompt.strip(), "times": [], "counts": [], "ids": set()}
 
     try:
         while True:
@@ -135,7 +165,7 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, config_name, run_s
             try:
                 instances, ms = cam_tracker.track_frame(session, frame)
             except Exception as e:
-                yield None, f"Tracking failed on config '{config_name}': {e}", run_state
+                yield None, f"Tracking failed on '{label}': {e}", run_state
                 return
 
             run_state["ids"].update(i.obj_id for i in instances)
@@ -149,7 +179,7 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, config_name, run_s
                 show_masks=show_masks, show_boxes=show_boxes,
             )
             yield np.asarray(annotated), (
-                f'[{config_name}] "{prompt.strip()}" — {len(instances)} tracked now | '
+                f'[{label}] "{prompt.strip()}" — {len(instances)} tracked now | '
                 f"ids so far: {sorted(run_state['ids'])}\n"
                 f"{ms:.0f}ms this frame, {avg:.0f}ms avg ({1000 / avg:.1f} fps) | "
                 f"{len(run_state['times'])} frames"
@@ -177,7 +207,7 @@ def finalize_run(run_state, history):
     avg = sum(times) / len(times)
     hits = sum(1 for c in run_state["counts"] if c > 0)
     summary = (
-        f"{run_state['config']} | \"{run_state['prompt']}\" — "
+        f"{run_state['label']} | \"{run_state['prompt']}\" — "
         f"{1000 / avg:.1f} fps ({avg:.0f}ms avg) | "
         f"hits {hits}/{len(times)} | ids {len(run_state['ids'])}"
     )
@@ -209,24 +239,32 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
 
         with gr.Tab("Webcam (live)"):
             gr.Markdown(
-                "Live feed with tracking drawn on it. Speed depends on the config below — "
-                "the baseline runs ~1-2 fps, the bf16/fp16 configs roughly double that with "
-                "no observed quality loss so far. Streaming also disables the heuristics "
-                "that prune duplicate tracks, so expect more false positives than the "
-                "file tab. The camera must be free — "
-                "close any browser tab or app already using it. Changing config only takes "
-                "effect on the next Start (Stop first); the first use of a new config pays "
-                "a ~5-10s reload."
+                "Live feed with tracking drawn on it. Three backends to compare:\n"
+                "- **SAM3** — reliable text-prompt grounding (handles niche nouns like "
+                "\"meatball\" well) but slow; the config dropdown picks precision.\n"
+                "- **YOLOE (text prompt)** — fast (~100-500ms/frame) but its MobileCLIP "
+                "vocabulary is noticeably weaker on specific food nouns; low confidence "
+                "even when it does find something.\n"
+                "- **Hybrid** — runs SAM3 every frame until it grounds the prompt once, "
+                "then switches to YOLOE's visual-exemplar tracking (fast, 0.9+ confidence) "
+                "for every frame after. Expect a slow start, then a speed-up.\n\n"
+                "Streaming disables the heuristics that prune duplicate tracks, so expect "
+                "more false positives than the file tab. The camera must be free — close "
+                "any browser tab or app already using it. Changing model/config only takes "
+                "effect on the next Start (Stop first); the first use of a new one pays a "
+                "load cost (~5-10s SAM3 config, longer for YOLOE's first-ever download)."
             )
             w_view = gr.Image(label="Live", type="numpy", height=520)
             w_info = gr.Textbox(label="Status", lines=2)
             with gr.Row():
                 w_prompt = gr.Textbox(label="Prompt", placeholder="pen", scale=3)
                 w_camera = gr.Number(value=0, label="Camera index", precision=0, scale=1)
-            w_config = gr.Dropdown(
-                choices=[c.name for c in CONFIGS], value=CONFIGS[0].name,
-                label="Benchmark config",
-            )
+            with gr.Row():
+                w_model = gr.Dropdown(choices=MODEL_CHOICES, value=MODEL_SAM3, label="Model")
+                w_config = gr.Dropdown(
+                    choices=[c.name for c in CONFIGS], value=CONFIGS[0].name,
+                    label="SAM3 config (ignored unless Model = SAM3)",
+                )
             with gr.Row():
                 w_masks = gr.Checkbox(value=True, label="Segmentation masks")
                 w_boxes = gr.Checkbox(value=True, label="Bounding boxes")
@@ -242,7 +280,7 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
 
             stream_event = w_start.click(
                 webcam_loop,
-                [w_prompt, w_masks, w_boxes, w_camera, w_config, w_run_state],
+                [w_prompt, w_masks, w_boxes, w_camera, w_model, w_config, w_run_state],
                 [w_view, w_info, w_run_state],
                 show_progress="hidden",
             )

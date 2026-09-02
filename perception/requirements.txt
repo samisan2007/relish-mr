@@ -14,3 +14,5 @@ imageio
 imageio-ffmpeg
 gradio
 requests
+ultralytics  # YOLOE backend (yoloe_runner.py) — downloads its own weights + a ~570MB
+             # MobileCLIP text encoder on first use, separate from the facebook/sam3 cache.

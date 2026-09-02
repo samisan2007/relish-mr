@@ -53,16 +53,41 @@ otherwise need several GB. Writes `<video>_<prompt>.mp4` next to the source.
 Or use the UI (`run_sam_vid.cmd` from the repo root), which has two tabs:
 
 - **Video file** — the offline path above, better quality.
-- **Webcam (live)** — streaming inference. Enter a prompt, pick a **Benchmark
-  config** (precision/resolution/compile — same options as `bench_realtime.py`
-  below), press Start. Stop logs that run's fps/ms/hit-rate into a rolling
-  log of the last 8 runs, so you can flip configs and compare by eye against
-  a real moving object instead of only trusting the fixed-clip numbers.
-  Switching config takes effect on the next Start and reloads the model
-  (~5-10s) the first time it's used. Streaming disables the heuristics that
-  prune duplicate tracks, so expect more false positives than the file tab.
+- **Webcam (live)** — streaming inference with three selectable backends (see
+  below), plus a **SAM3 config** dropdown (precision/resolution/compile — same
+  options as `bench_realtime.py`, only used when Model = SAM3). Stop logs that
+  run's fps/ms/hit-rate into a rolling log of the last 8 runs, so you can flip
+  backends/configs and compare by eye against a real moving object instead of
+  only trusting fixed-clip numbers. Switching model/config takes effect on the
+  next Start and reloads (~5-10s SAM3, longer for YOLOE's first-ever download).
+  Streaming disables the heuristics that prune duplicate tracks, so expect
+  more false positives than the file tab.
 
 First ever run downloads ~3.5 GB of model weights to the Hugging Face cache.
+
+## Model backends (webcam tab)
+
+`yoloe_runner.py` adds two alternatives to SAM3, evaluated after finding SAM3's
+best config still tops out around 3.8 fps (fp16 autocast, real detections):
+
+- **YOLOE (text prompt)** — Ultralytics' YOLOE, fast (~100-500ms/frame,
+  independent of internal resolution the way SAM3 is not). But its
+  open-vocabulary text encoder (a lightweight MobileCLIP model) is noticeably
+  weaker than SAM3's on specific food nouns: "meatball" tops out around 0.17
+  confidence even on the largest checkpoint (yoloe-11l-seg), vs. SAM3 finding
+  it cleanly. Don't take a single fixed-clip empty-scene benchmark's word for
+  a model's quality — this only showed up once tested against a real object.
+- **Hybrid (SAM3 seed -> YOLOE track)** — the pairing this points toward: SAM3
+  grounds the prompt once (slow, ~1s, but reliable on niche nouns), then every
+  instance it found seeds YOLOE's *visual*-exemplar mode (not text) for every
+  frame after, with `persist=True` for stable track IDs. YOLOE's visual
+  prompting is excellent — 0.9+ confidence on the same objects text-prompting
+  nearly missed — so this gets SAM3's semantic reliability once and YOLOE's
+  speed continuously. Seeding with only the single best-scoring SAM3 instance
+  generalized poorly (found 1/13 meatballs in testing); seeding with every
+  instance SAM3 found fixed that (11-13/13). Re-attempts SAM3 grounding every
+  frame until something is found, then switches over permanently for the rest
+  of the stream — it does not re-ground if the object changes mid-stream.
 
 ## Real-time benchmark
 
@@ -125,5 +150,6 @@ real moving object (see below).
 | `track_video.py` | CLI: track a concept through a video, write an annotated `.mp4` |
 | `video_ui.py` | Gradio video tracker — "Video file" and "Webcam (live)" tabs |
 | `bench_realtime.py` | Benchmarks precision/resolution/compile configs against one captured webcam clip |
+| `yoloe_runner.py` | YOLOE text-prompt and SAM3-seeded-hybrid trackers — alternatives to `Sam3VideoTracker` in the webcam tab |
 
 Work is logged in `../Documentation/devlog.md`.

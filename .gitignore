@@ -9,11 +9,14 @@ Test Data/
 
 # Model weights — SAM 3 lives in the Hugging Face cache (~/.cache/huggingface),
 # outside the repo. These patterns are a guard against any local copy.
+# YOLOE (yoloe_runner.py) downloads its .pt weights and a ~600MB MobileCLIP
+# .ts encoder straight into perception/ — same guard applies.
 *.safetensors
 *.bin
 *.pt
 *.pth
 *.onnx
+perception/*.ts
 
 # Media / run outputs
 *.mp4
