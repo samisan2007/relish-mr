@@ -168,7 +168,9 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
                 yield None, f"Tracking failed on '{label}': {e}", run_state
                 return
 
-            run_state["ids"].update(i.obj_id for i in instances)
+            # obj_id can be None for a not-yet-confirmed ByteTrack detection (YOLOE/Hybrid
+            # backends) — real on live, moving footage, doesn't show up on a static frame.
+            run_state["ids"].update(i.obj_id for i in instances if i.obj_id is not None)
             run_state["times"].append(ms)
             run_state["counts"].append(len(instances))
             recent = run_state["times"][-10:]
