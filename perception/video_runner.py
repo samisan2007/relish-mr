@@ -82,6 +82,8 @@ class Sam3VideoTracker:
         processor_size: int | None = None,
         use_device_map: bool = True,
         compile_model: bool = False,
+        cudnn_benchmark: bool = False,
+        max_cond_frame_num: int | None = None,
     ):
         """
         dtype: autocast precision (e.g. torch.bfloat16). None runs full fp32, no autocast.
@@ -100,15 +102,39 @@ class Sam3VideoTracker:
             experimentation but treat as unsupported until that's fixed upstream.
         use_device_map: False does a plain `.to("cuda")` instead of `device_map="auto"`,
             skipping accelerate's dispatch hooks (relevant for single-GPU perf testing).
-        compile_model: wraps the model in torch.compile. Experimental — the stateful video
-            session can trigger recompiles per frame, so this may not help.
+        compile_model: wraps the model in torch.compile. Confirmed broken on Windows — no
+            Triton install (Windows isn't officially supported) — left in as an experimental
+            config that fails cleanly rather than crashing the run.
+        cudnn_benchmark: sets torch.backends.cudnn.benchmark, a PROCESS-GLOBAL PyTorch flag
+            (not per-model) — every Sam3VideoTracker construction sets it, last one wins for
+            the whole process, including trackers built earlier. Only ~5% steady-state gain
+            measured; not worth the global-state risk except for the explicit "tuned" config.
+        max_cond_frame_num: caps how many past frames the tracker conditions on per step
+            (default 4, from tracker_config). Only ~5% steady-state gain measured — most of
+            the model's per-frame cost is the fixed-size vision backbone, not this.
+
+        IMPORTANT — per-frame cost is NOT flat: it ramps up over roughly the first 7-8
+        frames as the memory bank (tracker_config.num_maskmem=7) fills, then plateaus at
+        roughly 2x the first frame's cost. A short benchmark (a few seconds) measures the
+        ramp, not steady state — see bench_realtime.py's warmup default. num_maskmem itself
+        looked like an obvious lever to shrink that ramp/plateau, but it's tied to a learned
+        positional-embedding weight shaped exactly [7, 1, 1, 64] — changing it throws a
+        checkpoint size-mismatch at load time, so it's not a usable knob.
         """
         from transformers import Sam3VideoModel, Sam3VideoProcessor
+
+        torch.backends.cudnn.benchmark = cudnn_benchmark
 
         t0 = time.perf_counter()
         model_kwargs = {}
         if use_device_map:
             model_kwargs["device_map"] = "auto"
+        if max_cond_frame_num is not None:
+            from transformers import AutoConfig
+
+            config = AutoConfig.from_pretrained(model_id)
+            config.tracker_config.max_cond_frame_num = max_cond_frame_num
+            model_kwargs["config"] = config
         self.model = Sam3VideoModel.from_pretrained(model_id, **model_kwargs)
         if not use_device_map:
             self.model = self.model.to("cuda" if torch.cuda.is_available() else "cpu")

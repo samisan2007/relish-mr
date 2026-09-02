@@ -146,6 +146,13 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
     capture = cv2.VideoCapture(int(camera_index), cv2.CAP_DSHOW)
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    # Inference (hundreds of ms-1s/frame) is far slower than the camera's native rate, so
+    # without this the driver queues frames faster than we consume them and read() drains
+    # a growing backlog instead of returning the current one — the feed falls further and
+    # further behind real time. Asking for a 1-frame buffer keeps read() on the latest
+    # frame. Not guaranteed to hold with DSHOW on Windows — if the lag comes back, the next
+    # step is a background capture thread instead of relying on this.
+    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not capture.isOpened():
         yield None, (f"Could not open camera {int(camera_index)}. Close any other app or "
                      "browser tab using it, or try a different index."), run_state
@@ -242,14 +249,20 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
         with gr.Tab("Webcam (live)"):
             gr.Markdown(
                 "Live feed with tracking drawn on it. Three backends to compare:\n"
-                "- **SAM3** — reliable text-prompt grounding (handles niche nouns like "
-                "\"meatball\" well) but slow; the config dropdown picks precision.\n"
+                "- **SAM3** — reliable text-prompt grounding, tracks through rotation/angle "
+                "changes because it keeps a memory of the object, not just detection: at "
+                "steady state (after ~7-8 frames, once its memory bank fills) it settles "
+                "around **~1 fps** regardless of config — the ramp-up you'll see at the "
+                "start looks faster but isn't the real number.\n"
                 "- **YOLOE (text prompt)** — fast (~100-500ms/frame) but its MobileCLIP "
                 "vocabulary is noticeably weaker on specific food nouns; low confidence "
                 "even when it does find something.\n"
-                "- **Hybrid** — runs SAM3 every frame until it grounds the prompt once, "
-                "then switches to YOLOE's visual-exemplar tracking (fast, 0.9+ confidence) "
-                "for every frame after. Expect a slow start, then a speed-up.\n\n"
+                "- **Hybrid** — SAM3 grounds the prompt once, then hands off to YOLOE's "
+                "visual-exemplar tracking for speed. In testing this re-detects by "
+                "similarity to that one snapshot rather than really tracking, so it loses "
+                "the object on angle/pose changes the same way plain YOLOE does — it isn't "
+                "currently a fix for SAM3 being slow, just a different way to see the same "
+                "weakness.\n\n"
                 "Streaming disables the heuristics that prune duplicate tracks, so expect "
                 "more false positives than the file tab. The camera must be free — close "
                 "any browser tab or app already using it. Changing model/config only takes "

@@ -29,6 +29,8 @@ class Config:
     processor_size: int | None = None
     use_device_map: bool = True
     compile_model: bool = False
+    cudnn_benchmark: bool = False
+    max_cond_frame_num: int | None = None
 
 
 # processor_size overrides (504px/288px) are deliberately absent: the video session's
@@ -36,12 +38,24 @@ class Config:
 # token grid, so a real detection throws a tensor-size mismatch once a track is created.
 # Sam3VideoTracker still accepts processor_size for when that's fixed upstream, but it's
 # not a usable lever today — see the constructor docstring in video_runner.py.
+#
+# torch.compile is also absent: confirmed broken (missing Triton, no official Windows
+# support), fails on the very first forward pass every time. Not worth a dead entry.
+#
+# IMPORTANT: per-frame cost ramps up over the first ~7-8 frames as the memory bank fills,
+# then plateaus around 2x the first frame's cost (e.g. fp16 measured ~530ms -> ~1030ms
+# steady state) — see the Sam3VideoTracker docstring. --warmup below must exceed that ramp
+# or you're comparing configs during warm-up, not steady state.
 CONFIGS = [
     Config("baseline (fp32, 1008px, device_map)"),
     Config("fp16 autocast, 1008px", dtype=torch.float16),
     Config("bf16 autocast, 1008px", dtype=torch.bfloat16),
     Config("bf16 autocast, 1008px, no device_map", dtype=torch.bfloat16, use_device_map=False),
-    Config("bf16 autocast, 1008px, compiled", dtype=torch.bfloat16, compile_model=True),
+    # cudnn.benchmark + capping conditioning frames to 1: the only other two knobs found
+    # that don't break correctness. Only ~5% faster than plain fp16 in testing — most of
+    # the per-frame cost is the fixed-size vision backbone, which neither knob touches.
+    Config("fp16 autocast, 1008px, tuned", dtype=torch.float16,
+           cudnn_benchmark=True, max_cond_frame_num=1),
 ]
 
 
@@ -84,6 +98,8 @@ def run_config(cfg: Config, frames: list[np.ndarray], prompt: str, warmup: int) 
             processor_size=cfg.processor_size,
             use_device_map=cfg.use_device_map,
             compile_model=cfg.compile_model,
+            cudnn_benchmark=cfg.cudnn_benchmark,
+            max_cond_frame_num=cfg.max_cond_frame_num,
         )
         session = tracker.start_stream(prompt)
 
@@ -92,7 +108,7 @@ def run_config(cfg: Config, frames: list[np.ndarray], prompt: str, warmup: int) 
         seen_ids: set[int] = set()
         for i, frame in enumerate(frames):
             instances, ms = tracker.track_frame(session, frame)
-            if i >= warmup:  # let compile/cudnn autotune settle before timing
+            if i >= warmup:  # past the ~7-8 frame memory-bank ramp — see CONFIGS comment
                 times_ms.append(ms)
                 counts.append(len(instances))
                 seen_ids.update(inst.obj_id for inst in instances)
@@ -141,8 +157,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prompt", required=True, help="Noun phrase to track, e.g. 'phone'")
     parser.add_argument("--camera-index", type=int, default=0)
-    parser.add_argument("--capture-seconds", type=float, default=8.0)
-    parser.add_argument("--warmup", type=int, default=3, help="Frames to discard before timing")
+    parser.add_argument("--capture-seconds", type=float, default=15.0)
+    parser.add_argument("--warmup", type=int, default=10,
+                         help="Frames to discard before timing — must exceed the ~7-8 frame "
+                              "memory-bank ramp or you're measuring warm-up, not steady state")
     parser.add_argument("--configs", nargs="*", help="Subset of config names to run (substring match)")
     args = parser.parse_args()
 

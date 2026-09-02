@@ -54,21 +54,25 @@ Or use the UI (`run_sam_vid.cmd` from the repo root), which has two tabs:
 
 - **Video file** — the offline path above, better quality.
 - **Webcam (live)** — streaming inference with three selectable backends (see
-  below), plus a **SAM3 config** dropdown (precision/resolution/compile — same
-  options as `bench_realtime.py`, only used when Model = SAM3). Stop logs that
-  run's fps/ms/hit-rate into a rolling log of the last 8 runs, so you can flip
-  backends/configs and compare by eye against a real moving object instead of
-  only trusting fixed-clip numbers. Switching model/config takes effect on the
-  next Start and reloads (~5-10s SAM3, longer for YOLOE's first-ever download).
-  Streaming disables the heuristics that prune duplicate tracks, so expect
-  more false positives than the file tab.
+  below), plus a **SAM3 config** dropdown (precision/dispatch/conditioning-frame
+  knobs — same options as `bench_realtime.py`, only used when Model = SAM3).
+  Stop logs that run's fps/ms/hit-rate into a rolling log of the last 8 runs,
+  so you can flip backends/configs and compare by eye against a real moving
+  object instead of only trusting fixed-clip numbers. Switching model/config
+  takes effect on the next Start and reloads (~5-10s SAM3, longer for YOLOE's
+  first-ever download). Streaming disables the heuristics that prune duplicate
+  tracks, so expect more false positives than the file tab. Capture requests a
+  1-frame OpenCV buffer (`CAP_PROP_BUFFERSIZE`) so the feed doesn't fall
+  further and further behind real time as inference lags the camera's native
+  rate — not guaranteed to hold on Windows' DSHOW backend; if the lag comes
+  back, the next step is a background capture thread instead.
 
 First ever run downloads ~3.5 GB of model weights to the Hugging Face cache.
 
 ## Model backends (webcam tab)
 
-`yoloe_runner.py` adds two alternatives to SAM3, evaluated after finding SAM3's
-best config still tops out around 3.8 fps (fp16 autocast, real detections):
+`yoloe_runner.py` adds two alternatives to SAM3, evaluated after finding SAM3
+plateaus around 1 fps at steady state regardless of config (see below):
 
 - **YOLOE (text prompt)** — Ultralytics' YOLOE, fast (~100-500ms/frame,
   independent of internal resolution the way SAM3 is not). But its
@@ -77,17 +81,28 @@ best config still tops out around 3.8 fps (fp16 autocast, real detections):
   confidence even on the largest checkpoint (yoloe-11l-seg), vs. SAM3 finding
   it cleanly. Don't take a single fixed-clip empty-scene benchmark's word for
   a model's quality — this only showed up once tested against a real object.
-- **Hybrid (SAM3 seed -> YOLOE track)** — the pairing this points toward: SAM3
-  grounds the prompt once (slow, ~1s, but reliable on niche nouns), then every
-  instance it found seeds YOLOE's *visual*-exemplar mode (not text) for every
-  frame after, with `persist=True` for stable track IDs. YOLOE's visual
-  prompting is excellent — 0.9+ confidence on the same objects text-prompting
-  nearly missed — so this gets SAM3's semantic reliability once and YOLOE's
-  speed continuously. Seeding with only the single best-scoring SAM3 instance
-  generalized poorly (found 1/13 meatballs in testing); seeding with every
-  instance SAM3 found fixed that (11-13/13). Re-attempts SAM3 grounding every
-  frame until something is found, then switches over permanently for the rest
-  of the stream — it does not re-ground if the object changes mid-stream.
+- **Hybrid (SAM3 seed -> YOLOE track)** — SAM3 grounds the prompt once (slow,
+  ~1s, but reliable on niche nouns), then every instance it found seeds
+  YOLOE's *visual*-exemplar mode (not text) for every frame after, with
+  `persist=True` for stable track IDs. Seeding with only the single
+  best-scoring SAM3 instance generalized poorly (found 1/13 meatballs);
+  seeding with every instance SAM3 found fixed that (11-13/13) — but that fix
+  was on a static test image. **Live-webcam testing (moving pen, moving eye)
+  found this doesn't actually inherit SAM3's robustness**: YOLOE's
+  visual-exemplar mode re-detects each frame by similarity to that one
+  captured snapshot rather than really tracking, so it loses the object on
+  angle/pose changes the same way plain YOLOE text-prompt mode does — Hybrid
+  degraded to "performs exactly like YOLOE alone" once seeded. SAM3's real
+  advantage isn't just grounding, it's a memory bank that keeps updating its
+  understanding of the object across frames; a one-shot exemplar hand-off
+  can't cheaply inherit that. Current conclusion: this isn't a working fix
+  for SAM3's speed, just a different way to hit the same weakness. Next
+  candidates being considered: a periodic-refresh version (re-run SAM3 on a
+  steady cadence as an authoritative correction, hold/interpolate the box
+  between updates, rather than trusting YOLOE for real tracking work);
+  feeding YOLOE a growing set of exemplars across angles instead of one
+  frozen snapshot; or accepting SAM3's ~1fps and building interaction around
+  that instead of chasing a substitute.
 
 ## Real-time benchmark
 
@@ -99,11 +114,11 @@ fixed 1008x1008 before it reaches the model, so capture resolution isn't the
 cost knob — precision and that internal resize target are.
 
 ```powershell
-.\.venv\Scripts\python.exe bench_realtime.py --prompt "phone" --capture-seconds 8
+.\.venv\Scripts\python.exe bench_realtime.py --prompt "phone" --capture-seconds 15
 ```
 
 Move the object during the 3s countdown so the clip has real motion to judge
-mask quality against. Or from the repo root: `run_sam_bench.cmd "phone" 8`.
+mask quality against. Or from the repo root: `run_sam_bench.cmd "phone" 15`.
 
 Findings on an RTX 5070, verified against a real detection (not just an
 empty-scene timing run — see caveat below):
@@ -123,9 +138,31 @@ empty-scene timing run — see caveat below):
   hardcoded to the default 72x72 (1008px/14) token grid, so a real detection
   throws a tensor-size mismatch. Removed from `CONFIGS`; capture/display
   resolution was never the actual cost knob anyway (see above).
-- **`torch.compile`** — still fails, now on a missing Triton install (Triton
-  doesn't officially support Windows). Left in `CONFIGS` as an experimental
-  config that fails cleanly rather than crashing the run.
+- **`torch.compile`** — confirmed dead (missing Triton, no official Windows
+  support), fails on the very first forward pass every time. Removed from
+  `CONFIGS` rather than left as a config that always shows FAILED.
+
+**Per-frame cost is not flat — this changes the earlier numbers above.**
+Timing ramps up over roughly the first 7-8 frames as the memory bank
+(`tracker_config.num_maskmem`, default 7) fills, then plateaus around **2x**
+the first frame's cost. Measured on fp16: ~530ms first frame -> **~1030ms
+steady state** (not the ~270-500ms a short burst suggests). All the earlier
+config numbers above were measured on short bursts that only partially
+crossed this ramp, so they understate real sustained cost — `--warmup`
+defaults to 10 now (was 3) and `--capture-seconds` to 15 (was 8) so a normal
+run actually reaches steady state before it starts timing.
+
+`num_maskmem` looked like the obvious lever to shrink that ramp, but it's
+tied to a learned positional-embedding weight shaped exactly `[7, 1, 1, 64]`
+— reducing it throws a checkpoint size-mismatch at load time, not usable.
+Two knobs that don't break correctness — `torch.backends.cudnn.benchmark`
+and capping `tracker_config.max_cond_frame_num` to 1 — only bought ~5%
+steady-state improvement combined (`fp16 ... tuned` in `CONFIGS`); most of
+the per-frame cost is the fixed-size vision backbone, which neither touches.
+There's no remaining config-level lever that meaningfully beats fp16/bf16
+autocast — further speedup likely means a different architecture (see the
+YOLOE section) or restructuring how often SAM3 actually needs to run rather
+than tuning its own knobs further.
 
 Caveat: any timing run where the prompt never matches anything only exercises
 the "no detection" code path, which is measurably cheaper and can hide bugs

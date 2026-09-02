@@ -1,6 +1,7 @@
 @echo off
-REM Benchmarks real-time webcam tracking configs (precision/resolution/compile) against
-REM one captured clip. Move the object during the 3s countdown.
+REM Benchmarks real-time webcam tracking configs (precision/dispatch/conditioning-frame
+REM knobs) against one captured clip. Move the object during the 3s countdown, and expect
+REM most of the ~15s clip to be spent on the memory-bank warm-up ramp before steady state.
 REM Usage: run_sam_bench.cmd "phone" [capture-seconds]   (or just double-click and enter it)
 cd /d "%~dp0perception"
 
@@ -19,7 +20,7 @@ if "%PROMPT%"=="" (
 )
 
 set SECONDS=%~2
-if "%SECONDS%"=="" set SECONDS=8
+if "%SECONDS%"=="" set SECONDS=15
 
 .venv\Scripts\python.exe bench_realtime.py --prompt "%PROMPT%" --capture-seconds %SECONDS%
 
