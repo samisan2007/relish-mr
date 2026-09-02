@@ -75,13 +75,60 @@ def open_writer(path: str | Path, fps: float):
 
 
 class Sam3VideoTracker:
-    def __init__(self, model_id: str = MODEL_ID):
+    def __init__(
+        self,
+        model_id: str = MODEL_ID,
+        dtype: "torch.dtype | None" = None,
+        processor_size: int | None = None,
+        use_device_map: bool = True,
+        compile_model: bool = False,
+    ):
+        """
+        dtype: autocast precision (e.g. torch.bfloat16). None runs full fp32, no autocast.
+            Applied via torch.autocast around each forward pass rather than converting the
+            model's stored weights — the video session creates some tensors (memory-bank
+            slots, object queries) as plain fp32 tensors outside the parameter tree, so a
+            wholesale `.to(dtype)` leaves those mismatched against cast weights the moment a
+            track is actually created ("Input type (float) and bias type (struct c10::Half)
+            should be the same"). Autocast casts op-by-op instead, so those fresh fp32
+            tensors stay compatible.
+        processor_size: override the fixed square resize (default 1008) the processor applies
+            to every frame before it hits the model. NOTE: currently broken once a track is
+            created — the video session's memory-bank/position-embedding buffers are sized
+            for the default 72x72 (1008px / 14) token grid regardless of this override, so a
+            real detection throws a tensor-size mismatch (1296 or 400 vs 5184). Left in for
+            experimentation but treat as unsupported until that's fixed upstream.
+        use_device_map: False does a plain `.to("cuda")` instead of `device_map="auto"`,
+            skipping accelerate's dispatch hooks (relevant for single-GPU perf testing).
+        compile_model: wraps the model in torch.compile. Experimental — the stateful video
+            session can trigger recompiles per frame, so this may not help.
+        """
         from transformers import Sam3VideoModel, Sam3VideoProcessor
 
         t0 = time.perf_counter()
-        self.model = Sam3VideoModel.from_pretrained(model_id, device_map="auto")
-        self.processor = Sam3VideoProcessor.from_pretrained(model_id)
+        model_kwargs = {}
+        if use_device_map:
+            model_kwargs["device_map"] = "auto"
+        self.model = Sam3VideoModel.from_pretrained(model_id, **model_kwargs)
+        if not use_device_map:
+            self.model = self.model.to("cuda" if torch.cuda.is_available() else "cpu")
+        self.autocast_dtype = dtype
+
+        processor_kwargs = {}
+        if processor_size is not None:
+            processor_kwargs["size"] = {"height": processor_size, "width": processor_size}
+        self.processor = Sam3VideoProcessor.from_pretrained(model_id, **processor_kwargs)
+
+        if compile_model:
+            self.model = torch.compile(self.model)
         self.load_seconds = time.perf_counter() - t0
+
+    def _autocast(self):
+        return torch.autocast(
+            device_type="cuda" if torch.cuda.is_available() else "cpu",
+            dtype=self.autocast_dtype,
+            enabled=self.autocast_dtype is not None,
+        )
 
     @property
     def device(self) -> str:
@@ -107,7 +154,7 @@ class Sam3VideoTracker:
         t0 = time.perf_counter()
         inputs = self.processor(images=frame, device=self.model.device, return_tensors="pt")
         inputs = inputs.to(self.model.device)
-        with torch.no_grad():
+        with torch.no_grad(), self._autocast():
             outputs = self.model(inference_session=session, frame=inputs.pixel_values[0])
         processed = self.processor.postprocess_outputs(
             session, outputs, original_sizes=inputs.original_sizes
@@ -130,16 +177,17 @@ class Sam3VideoTracker:
         )
         self.processor.add_text_prompt(session, text)
 
-        for outputs in self.model.propagate_in_video_iterator(inference_session=session):
-            t0 = time.perf_counter()
-            processed = self.processor.postprocess_outputs(session, outputs)
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            inference_ms = (time.perf_counter() - t0) * 1000
+        with self._autocast():
+            for outputs in self.model.propagate_in_video_iterator(inference_session=session):
+                t0 = time.perf_counter()
+                processed = self.processor.postprocess_outputs(session, outputs)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                inference_ms = (time.perf_counter() - t0) * 1000
 
-            yield FrameResult(
-                frame_idx=outputs.frame_idx,
-                image=Image.fromarray(frames[outputs.frame_idx]),
-                instances=_to_instances(processed),
-                inference_ms=inference_ms,
-            )
+                yield FrameResult(
+                    frame_idx=outputs.frame_idx,
+                    image=Image.fromarray(frames[outputs.frame_idx]),
+                    instances=_to_instances(processed),
+                    inference_ms=inference_ms,
+                )

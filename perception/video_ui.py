@@ -4,7 +4,9 @@
 
 Separate port from ui.py so the image and video testers can run side by side.
 Both tabs use the same Sam3VideoModel; the file tab runs the offline path
-(better quality) and the webcam tab runs streaming inference (~1 fps).
+(better quality). The webcam tab runs streaming inference and lets you pick
+a speed/quality config per run (see bench_realtime.py for what each one
+changes) and logs the last several runs so they're easy to compare.
 """
 
 import tempfile
@@ -13,14 +15,39 @@ from pathlib import Path
 import cv2
 import gradio as gr
 import numpy as np
+import torch
 from PIL import Image
 
+from bench_realtime import CONFIGS
 from video_runner import Sam3VideoTracker, load_frames, open_writer
 from viz import draw_instances
 
 print("Loading SAM 3 video model...")
 tracker = Sam3VideoTracker()
 print(f"Ready on {tracker.device} ({tracker.load_seconds:.1f}s)")
+
+# Webcam tab: one extra model may be cached alongside `tracker` so switching between the
+# baseline config and one alternate is instant; switching to a different alternate reloads.
+_bench_cache: dict[str, Sam3VideoTracker] = {}
+
+
+def get_bench_tracker(config_name: str) -> Sam3VideoTracker:
+    cfg = next((c for c in CONFIGS if c.name == config_name), CONFIGS[0])
+    if cfg.name == CONFIGS[0].name:
+        return tracker  # already loaded — avoid a redundant ~2GB VRAM copy
+
+    if config_name not in _bench_cache:
+        _bench_cache.clear()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(f"Loading webcam benchmark config: {cfg.name} ...")
+        _bench_cache[config_name] = Sam3VideoTracker(
+            dtype=cfg.dtype,
+            processor_size=cfg.processor_size,
+            use_device_map=cfg.use_device_map,
+            compile_model=cfg.compile_model,
+        )
+    return _bench_cache[config_name]
 
 
 def run_file(video_path, prompt, max_frames, stride, show_masks, show_boxes,
@@ -64,15 +91,26 @@ def run_file(video_path, prompt, max_frames, stride, show_masks, show_boxes,
     ])
 
 
-def webcam_loop(prompt, show_masks, show_boxes, camera_index):
+def webcam_loop(prompt, show_masks, show_boxes, camera_index, config_name, run_state):
     """Grab frames from the local camera and yield annotated ones, until cancelled.
 
     Capture happens server-side (OpenCV) rather than in the browser, so the feed
     and its overlays are a single image. The camera must not be in use elsewhere
     — a browser tab holding it will block this.
+
+    `run_state` accumulates this run's per-frame timings so the Stop button can
+    summarize it into the log — it's read from gr.State, not the generator's
+    return value, since Gradio cancels this generator rather than letting it
+    finish normally.
     """
     if not prompt.strip():
-        yield None, "Enter a prompt first."
+        yield None, "Enter a prompt first.", run_state
+        return
+
+    try:
+        cam_tracker = get_bench_tracker(config_name)
+    except Exception as e:
+        yield None, f"Failed to load config '{config_name}': {e}", run_state
         return
 
     capture = cv2.VideoCapture(int(camera_index), cv2.CAP_DSHOW)
@@ -80,25 +118,30 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index):
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     if not capture.isOpened():
         yield None, (f"Could not open camera {int(camera_index)}. Close any other app or "
-                     "browser tab using it, or try a different index.")
+                     "browser tab using it, or try a different index."), run_state
         return
 
-    session = tracker.start_stream(prompt.strip())
-    seen: set[int] = set()
-    times: list[float] = []
+    session = cam_tracker.start_stream(prompt.strip())
+    run_state = {"config": config_name, "prompt": prompt.strip(), "times": [], "counts": [], "ids": set()}
 
     try:
         while True:
             ok, frame_bgr = capture.read()
             if not ok:
-                yield None, "Lost the camera feed."
+                yield None, "Lost the camera feed.", run_state
                 return
 
             frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            instances, ms = tracker.track_frame(session, frame)
-            seen.update(i.obj_id for i in instances)
-            times.append(ms)
-            recent = times[-10:]
+            try:
+                instances, ms = cam_tracker.track_frame(session, frame)
+            except Exception as e:
+                yield None, f"Tracking failed on config '{config_name}': {e}", run_state
+                return
+
+            run_state["ids"].update(i.obj_id for i in instances)
+            run_state["times"].append(ms)
+            run_state["counts"].append(len(instances))
+            recent = run_state["times"][-10:]
             avg = sum(recent) / len(recent)
 
             annotated = draw_instances(
@@ -106,13 +149,40 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index):
                 show_masks=show_masks, show_boxes=show_boxes,
             )
             yield np.asarray(annotated), (
-                f'"{prompt.strip()}" — {len(instances)} tracked now | '
-                f"ids so far: {sorted(seen)}\n"
+                f'[{config_name}] "{prompt.strip()}" — {len(instances)} tracked now | '
+                f"ids so far: {sorted(run_state['ids'])}\n"
                 f"{ms:.0f}ms this frame, {avg:.0f}ms avg ({1000 / avg:.1f} fps) | "
-                f"{len(times)} frames"
-            )
+                f"{len(run_state['times'])} frames"
+            ), run_state
     finally:
         capture.release()
+
+
+def format_log(history: list[str]) -> str:
+    if not history:
+        return "(no runs yet — Start, let it track, then Stop to log a result)"
+    return "\n".join(f"{i}. {line}" for i, line in enumerate(reversed(history), 1))
+
+
+def finalize_run(run_state, history):
+    """Stop-button handler: summarize the just-ended run from `run_state` into the log.
+
+    Reads accumulated stats out of state rather than the generator's own cleanup,
+    since Gradio's cancellation doesn't let the generator return a final value.
+    """
+    times = run_state.get("times") if run_state else None
+    if not times:
+        return "Stopped.", history, format_log(history), {}
+
+    avg = sum(times) / len(times)
+    hits = sum(1 for c in run_state["counts"] if c > 0)
+    summary = (
+        f"{run_state['config']} | \"{run_state['prompt']}\" — "
+        f"{1000 / avg:.1f} fps ({avg:.0f}ms avg) | "
+        f"hits {hits}/{len(times)} | ids {len(run_state['ids'])}"
+    )
+    history = (history + [summary])[-8:]
+    return "Stopped.", history, format_log(history), {}
 
 
 with gr.Blocks(title="SAM 3 video tracker") as demo:
@@ -139,29 +209,48 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
 
         with gr.Tab("Webcam (live)"):
             gr.Markdown(
-                "Live feed with tracking drawn on it. Runs at roughly **1.4 fps** on an "
-                "RTX 3080, so expect a slideshow rather than smooth video. Streaming also "
-                "disables the heuristics that prune duplicate tracks, so expect more false "
-                "positives than the file tab. The camera must be free — close any browser "
-                "tab or app already using it."
+                "Live feed with tracking drawn on it. Speed depends on the config below — "
+                "the baseline runs ~1-2 fps, the bf16/fp16 configs roughly double that with "
+                "no observed quality loss so far. Streaming also disables the heuristics "
+                "that prune duplicate tracks, so expect more false positives than the "
+                "file tab. The camera must be free — "
+                "close any browser tab or app already using it. Changing config only takes "
+                "effect on the next Start (Stop first); the first use of a new config pays "
+                "a ~5-10s reload."
             )
             w_view = gr.Image(label="Live", type="numpy", height=520)
             w_info = gr.Textbox(label="Status", lines=2)
             with gr.Row():
                 w_prompt = gr.Textbox(label="Prompt", placeholder="pen", scale=3)
                 w_camera = gr.Number(value=0, label="Camera index", precision=0, scale=1)
+            w_config = gr.Dropdown(
+                choices=[c.name for c in CONFIGS], value=CONFIGS[0].name,
+                label="Benchmark config",
+            )
             with gr.Row():
                 w_masks = gr.Checkbox(value=True, label="Segmentation masks")
                 w_boxes = gr.Checkbox(value=True, label="Bounding boxes")
             with gr.Row():
                 w_start = gr.Button("Start", variant="primary")
                 w_stop = gr.Button("Stop")
+            w_log = gr.Textbox(
+                label="Run log (last 8 — Stop a run to record it)", lines=10, interactive=False
+            )
+
+            w_run_state = gr.State({})
+            w_history = gr.State([])
 
             stream_event = w_start.click(
-                webcam_loop, [w_prompt, w_masks, w_boxes, w_camera], [w_view, w_info],
+                webcam_loop,
+                [w_prompt, w_masks, w_boxes, w_camera, w_config, w_run_state],
+                [w_view, w_info, w_run_state],
                 show_progress="hidden",
             )
-            w_stop.click(lambda: "Stopped.", None, [w_info], cancels=[stream_event])
+            w_stop.click(
+                finalize_run, [w_run_state, w_history],
+                [w_info, w_history, w_log, w_run_state],
+                cancels=[stream_event],
+            )
 
 if __name__ == "__main__":
     demo.launch(server_port=7861, inbrowser=True)

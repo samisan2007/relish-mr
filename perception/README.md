@@ -53,12 +53,63 @@ otherwise need several GB. Writes `<video>_<prompt>.mp4` next to the source.
 Or use the UI (`run_sam_vid.cmd` from the repo root), which has two tabs:
 
 - **Video file** — the offline path above, better quality.
-- **Webcam (live)** — streaming inference, measured at **~1.4 fps** (roughly
-  700ms/frame at 640x480) on an RTX 3080. Enter a prompt, press Start. Streaming
-  disables the heuristics that prune duplicate tracks, so expect more false
-  positives than the file tab.
+- **Webcam (live)** — streaming inference. Enter a prompt, pick a **Benchmark
+  config** (precision/resolution/compile — same options as `bench_realtime.py`
+  below), press Start. Stop logs that run's fps/ms/hit-rate into a rolling
+  log of the last 8 runs, so you can flip configs and compare by eye against
+  a real moving object instead of only trusting the fixed-clip numbers.
+  Switching config takes effect on the next Start and reloads the model
+  (~5-10s) the first time it's used. Streaming disables the heuristics that
+  prune duplicate tracks, so expect more false positives than the file tab.
 
 First ever run downloads ~3.5 GB of model weights to the Hugging Face cache.
+
+## Real-time benchmark
+
+`bench_realtime.py` captures one webcam clip, then replays those exact frames
+through several `Sam3VideoTracker` configs (precision, dispatch mode, internal
+processing resolution, `torch.compile`) so speed comparisons aren't muddied by
+webcam variance between runs. The processor always resizes every frame to a
+fixed 1008x1008 before it reaches the model, so capture resolution isn't the
+cost knob — precision and that internal resize target are.
+
+```powershell
+.\.venv\Scripts\python.exe bench_realtime.py --prompt "phone" --capture-seconds 8
+```
+
+Move the object during the 3s countdown so the clip has real motion to judge
+mask quality against. Or from the repo root: `run_sam_bench.cmd "phone" 8`.
+
+Findings on an RTX 5070, verified against a real detection (not just an
+empty-scene timing run — see caveat below):
+
+- **fp16/bf16 via `torch.autocast`** — ~2.2x speedup, same instance count as
+  fp32. Precision must go through autocast, not a full `dtype=` weight
+  conversion at load time: the video session creates some tensors (memory-bank
+  slots, object queries) as plain fp32 outside the parameter tree, so casting
+  stored weights leaves them mismatched the instant a track is actually
+  created (`Input type (float) and bias type (struct c10::Half) should be the
+  same`) — it only shows up once something matches the prompt, which is why
+  an empty-scene smoke test won't catch it. `video_runner.py` now handles
+  this correctly.
+- **`device_map="auto"` vs. plain `.to("cuda")`** — no measurable difference.
+- **Processor resize override (504px/288px)** — confirmed broken, not just
+  unoptimized: the video session's memory-bank/position-embedding buffers are
+  hardcoded to the default 72x72 (1008px/14) token grid, so a real detection
+  throws a tensor-size mismatch. Removed from `CONFIGS`; capture/display
+  resolution was never the actual cost knob anyway (see above).
+- **`torch.compile`** — still fails, now on a missing Triton install (Triton
+  doesn't officially support Windows). Left in `CONFIGS` as an experimental
+  config that fails cleanly rather than crashing the run.
+
+Caveat: any timing run where the prompt never matches anything only exercises
+the "no detection" code path, which is measurably cheaper and can hide bugs
+that only trigger once a track is created (as above). Use a prompt you know
+will hit, and check the `hits` column, not just fps.
+
+The same configs are also selectable live in `video_ui.py`'s Webcam tab,
+which logs each run's fps/hit-rate so you can compare a few by eye against a
+real moving object (see below).
 
 ## Layout
 
@@ -73,5 +124,6 @@ First ever run downloads ~3.5 GB of model weights to the Hugging Face cache.
 | `video_runner.py` | Video tracking (`Sam3VideoModel`) — offline `track()` and live `track_frame()` |
 | `track_video.py` | CLI: track a concept through a video, write an annotated `.mp4` |
 | `video_ui.py` | Gradio video tracker — "Video file" and "Webcam (live)" tabs |
+| `bench_realtime.py` | Benchmarks precision/resolution/compile configs against one captured webcam clip |
 
 Work is logged in `../Documentation/devlog.md`.
