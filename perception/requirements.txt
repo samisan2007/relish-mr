@@ -6,7 +6,6 @@
 
 transformers>=4.56
 accelerate
-kernels
 huggingface_hub[cli]
 numpy
 pillow
