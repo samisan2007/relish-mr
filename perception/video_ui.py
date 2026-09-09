@@ -42,6 +42,8 @@ _hybrid_tracker: HybridVideoTracker | None = None
 
 def get_bench_tracker(config_name: str) -> Sam3VideoTracker:
     cfg = next((c for c in CONFIGS if c.name == config_name), CONFIGS[0])
+    # cuDNN's flag is global, so reapply it even when selecting a cached tracker.
+    torch.backends.cudnn.benchmark = cfg.cudnn_benchmark
     if cfg.name == CONFIGS[0].name:
         return tracker  # already loaded — avoid a redundant ~2GB VRAM copy
 
@@ -55,6 +57,8 @@ def get_bench_tracker(config_name: str) -> Sam3VideoTracker:
             processor_size=cfg.processor_size,
             use_device_map=cfg.use_device_map,
             compile_model=cfg.compile_model,
+            cudnn_benchmark=cfg.cudnn_benchmark,
+            max_cond_frame_num=cfg.max_cond_frame_num,
         )
     return _bench_cache[config_name]
 
@@ -254,15 +258,11 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
                 "steady state (after ~7-8 frames, once its memory bank fills) it settles "
                 "around **~1 fps** regardless of config — the ramp-up you'll see at the "
                 "start looks faster but isn't the real number.\n"
-                "- **YOLOE (text prompt)** — fast (~100-500ms/frame) but its MobileCLIP "
-                "vocabulary is noticeably weaker on specific food nouns; low confidence "
-                "even when it does find something.\n"
-                "- **Hybrid** — SAM3 grounds the prompt once, then hands off to YOLOE's "
-                "visual-exemplar tracking for speed. In testing this re-detects by "
-                "similarity to that one snapshot rather than really tracking, so it loses "
-                "the object on angle/pose changes the same way plain YOLOE does — it isn't "
-                "currently a fix for SAM3 being slow, just a different way to see the same "
-                "weakness.\n\n"
+                "- **YOLOE (text prompt)** — faster text-based detection; recognition of "
+                "specific food nouns needs retesting after a color-handling fix.\n"
+                "- **Hybrid** — SAM3 finds the objects once, then YOLOE tracks using "
+                "their original appearance as a reference. The reference handoff has "
+                "been corrected; live rotation and occlusion still need testing.\n\n"
                 "Streaming disables the heuristics that prune duplicate tracks, so expect "
                 "more false positives than the file tab. The camera must be free — close "
                 "any browser tab or app already using it. Changing model/config only takes "

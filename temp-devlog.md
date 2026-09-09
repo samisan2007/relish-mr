@@ -1,5 +1,27 @@
 # Real-time food tracking — findings, progress, options
 
+## Review correction — 2026-09-07
+
+The observations below predate two implementation fixes: YOLOE received RGB
+NumPy frames where it expects BGR, and Hybrid reapplied seed boxes to each
+new frame without keeping the seed image. Hybrid now preserves that image,
+extracts visual embeddings from it once, and reuses them for later frames.
+The earlier explanation of motion failures as an architectural ceiling is
+therefore provisional; live rotation and occlusion need retesting with the
+corrected pipeline. The webcam's tuned config now also forwards both tuning
+options and reapplies the global cuDNN flag when switching cached configs.
+
+Validation after the fixes: seven automated regressions pass; the tuned
+SAM3 config detects 13 meatballs with both tuning options applied. A real
+SAM3-to-YOLOE run on a translated local image seeds 13 instances and detects
+10 after translation, keeps YOLOE IDs across the three follow-up frames,
+extracts visual embeddings only once, and installs a fresh reference on
+restart. This synthetic translation check does not validate live pose
+changes, occlusion, or sustained performance. Run it from `perception/` with
+`python tests/smoke_hybrid.py <image> <prompt>` using the project venv.
+
+The remaining sections preserve the earlier findings and proposed directions.
+
 *(Temp file at repo root — a devlog.md exists on another machine and will be
 merged in later. Kept separate and tracked so it survives a pull/merge,
 rather than living in the gitignored Documentation/ folder.)*

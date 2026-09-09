@@ -1,12 +1,45 @@
 # Perception — Batch 1: SAM 3 local test
 
-Python 3.12 venv (PyTorch CUDA wheels don't exist for the system Python 3.14).
+Tested on Windows with Python 3.12 and an NVIDIA RTX 5070. The webcam tools use
+OpenCV's Windows DirectShow backend.
 
 ## One-time setup
 
-1. Request access to the gated model at https://huggingface.co/facebook/sam3
+Run these commands in PowerShell from the repository root (`relish-mr/`).
+Install Python 3.12 first if `py -3.12 --version` cannot find it.
+
+1. Create the environment, then enter `perception/`:
+
+   ```powershell
+   py -3.12 -m venv perception\.venv
+   cd perception
+   .\.venv\Scripts\python.exe -m pip install --upgrade pip
+   ```
+
+2. Install the tested PyTorch/CUDA combination:
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+   ```
+
+   This is the CUDA 12.8 wheel for the local NVIDIA setup. For other hardware
+   or drivers, choose the matching wheel from the
+   [PyTorch installation instructions](https://pytorch.org/get-started/previous-versions/).
+
+3. Install the remaining dependencies and check the environment:
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+   .\.venv\Scripts\python.exe -m pip check
+   .\.venv\Scripts\python.exe -c "import torch; from transformers import Sam3Model, Sam3Processor, Sam3VideoModel, Sam3VideoProcessor; print('SAM3 imports OK; CUDA available:', torch.cuda.is_available())"
+   ```
+
+   On an NVIDIA machine, the last command should report `CUDA available: True`.
+   A CPU-only installation can run inference, but will be much slower.
+
+4. Request access to the gated model at https://huggingface.co/facebook/sam3
    (instant-ish approval after accepting the license).
-2. Create a token at https://huggingface.co/settings/tokens (read scope) and log in:
+5. Create a token at https://huggingface.co/settings/tokens (read scope) and log in:
 
    ```powershell
    .\.venv\Scripts\hf.exe auth login
@@ -17,7 +50,7 @@ Python 3.12 venv (PyTorch CUDA wheels don't exist for the system Python 3.14).
 From the `perception/` folder:
 
 1. **Start** — takes ~10s to load the model. From the repo root just run
-   `.\run_test.cmd` (or double-click it); the equivalent from here is:
+   `.\run_sam_img.cmd` (or double-click it); the equivalent from here is:
 
    ```powershell
    .\.venv\Scripts\python.exe ui.py
@@ -74,6 +107,11 @@ First ever run downloads ~3.5 GB of model weights to the Hugging Face cache.
 `yoloe_runner.py` adds two alternatives to SAM3, evaluated after finding SAM3
 plateaus around 1 fps at steady state regardless of config (see below):
 
+The earlier quality comparisons were recorded before fixing swapped color
+channels in both YOLOE backends and incorrect visual references in Hybrid.
+Those observations need live retesting before drawing conclusions about the
+models' relative robustness.
+
 - **YOLOE (text prompt)** — Ultralytics' YOLOE, fast (~100-500ms/frame,
   independent of internal resolution the way SAM3 is not). But its
   open-vocabulary text encoder (a lightweight MobileCLIP model) is noticeably
@@ -83,26 +121,36 @@ plateaus around 1 fps at steady state regardless of config (see below):
   a model's quality — this only showed up once tested against a real object.
 - **Hybrid (SAM3 seed -> YOLOE track)** — SAM3 grounds the prompt once (slow,
   ~1s, but reliable on niche nouns), then every instance it found seeds
-  YOLOE's *visual*-exemplar mode (not text) for every frame after, with
-  `persist=True` for stable track IDs. Seeding with only the single
-  best-scoring SAM3 instance generalized poorly (found 1/13 meatballs);
-  seeding with every instance SAM3 found fixed that (11-13/13) — but that fix
-  was on a static test image. **Live-webcam testing (moving pen, moving eye)
-  found this doesn't actually inherit SAM3's robustness**: YOLOE's
-  visual-exemplar mode re-detects each frame by similarity to that one
-  captured snapshot rather than really tracking, so it loses the object on
-  angle/pose changes the same way plain YOLOE text-prompt mode does — Hybrid
-  degraded to "performs exactly like YOLOE alone" once seeded. SAM3's real
-  advantage isn't just grounding, it's a memory bank that keeps updating its
-  understanding of the object across frames; a one-shot exemplar hand-off
-  can't cheaply inherit that. Current conclusion: this isn't a working fix
-  for SAM3's speed, just a different way to hit the same weakness. Next
-  candidates being considered: a periodic-refresh version (re-run SAM3 on a
-  steady cadence as an authoritative correction, hold/interpolate the box
-  between updates, rather than trusting YOLOE for real tracking work);
-  feeding YOLOE a growing set of exemplars across angles instead of one
-  frozen snapshot; or accepting SAM3's ~1fps and building interaction around
-  that instead of chasing a substitute.
+  YOLOE's visual-exemplar mode. The exact seed image is copied in BGR and
+  supplied as `refer_image` at the first YOLOE step; the resulting embeddings
+  are reused on later frames with `persist=True`. The old implementation
+  applied the original boxes to each new frame, so motion could replace the
+  intended exemplars with background. It never preserved the claimed frozen
+  snapshot. See the [YOLOE visual-prompt API](https://docs.ultralytics.com/models/yoloe/#visual-prompts)
+  for how reference images install persistent embeddings. Whether this
+  corrected handoff is robust enough for live pose changes and occlusion is
+  still an open question.
+
+## Regression checks
+
+From `perception/`, run the color and hybrid-handoff tests without model
+downloads, GPU inference, or camera access:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+For a real-model check, use an image containing a concept SAM3 can detect:
+
+```powershell
+.\.venv\Scripts\python.exe tests\smoke_hybrid.py "path\to\photo.jpg" "meatball"
+```
+
+This requires cached SAM3 weights and a local `yoloe-11l-seg.pt` (or `--model`
+pointing to a local checkpoint). It translates the image away from its seed
+coordinates, checks that visual embeddings are extracted once per stream,
+renders overlays in memory, and checks a restart with a new reference. It
+does not measure sustained speed or validate live rotation and occlusion.
 
 ## Real-time benchmark
 
