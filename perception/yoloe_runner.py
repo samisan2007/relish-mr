@@ -5,8 +5,7 @@ shape as Sam3VideoTracker so the webcam UI can swap between them without special
 
 - YoloeVideoTracker: pure text-prompt mode (YOLOE's own open-vocabulary text encoder,
   a lightweight MobileCLIP model). Earlier runs found low confidence on specific
-  food nouns, but those measurements predate the RGB/BGR fix and need retesting.
-- HybridVideoTracker: uses SAM3 to find every instance in a seed frame, then
+  food nouns, but those measurements predate the RGB/BGR fix and need retesting.- HybridVideoTracker: uses SAM3 to find every instance in a seed frame, then
   extracts YOLOE visual embeddings from that frame once. Later frames reuse
   those embeddings with persist=True for tracking. Motion quality needs live
   retesting after correcting the original color and reference-frame bugs.
