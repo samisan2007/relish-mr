@@ -1,2 +1,24 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Unity YAML is text, but never hand-merge it
+/unity/**/*.unity      -merge text
+/unity/**/*.prefab     -merge text
+/unity/**/*.asset      -merge text
+/unity/**/*.mat        -merge text
+/unity/**/*.anim       -merge text
+/unity/**/*.controller -merge text
+
+# Unity binaries -> LFS. Scoped to /unity/ so perception's text history stays plain git.
+/unity/**/*.fbx    filter=lfs diff=lfs merge=lfs -text
+/unity/**/*.blend  filter=lfs diff=lfs merge=lfs -text
+/unity/**/*.png    filter=lfs diff=lfs merge=lfs -text
+/unity/**/*.jpg    filter=lfs diff=lfs merge=lfs -text
+/unity/**/*.tga    filter=lfs diff=lfs merge=lfs -text
+/unity/**/*.psd    filter=lfs diff=lfs merge=lfs -text
+/unity/**/*.exr    filter=lfs diff=lfs merge=lfs -text
+/unity/**/*.hdr    filter=lfs diff=lfs merge=lfs -text
+/unity/**/*.wav    filter=lfs diff=lfs merge=lfs -text
+/unity/**/*.mp3    filter=lfs diff=lfs merge=lfs -text
+/unity/**/*.mp4    filter=lfs diff=lfs merge=lfs -text
+/unity/**/*.sentis filter=lfs diff=lfs merge=lfs -text

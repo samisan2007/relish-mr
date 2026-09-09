@@ -26,3 +26,24 @@ perception/*.ts
 
 # Generated overlays from test runs
 *_sam3.png
+
+# Unity generated files (project lives in unity/)
+/unity/[Ll]ibrary/
+/unity/[Tt]emp/
+/unity/[Oo]bj/
+/unity/[Bb]uild/
+/unity/[Bb]uilds/
+/unity/[Ll]ogs/
+/unity/[Uu]ser[Ss]ettings/
+/unity/[Mm]emoryCaptures/
+/unity/[Rr]ecordings/
+/unity/.vs/
+/unity/*.csproj
+/unity/*.sln
+/unity/*.slnx
+/unity/*.user
+
+# Unity assets are content, not run output — override the globs above
+!/unity/Assets/**
+!/unity/Packages/**
+!/unity/ProjectSettings/**
