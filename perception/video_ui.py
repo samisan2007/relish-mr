@@ -9,6 +9,7 @@ a speed/quality config per run (see bench_realtime.py for what each one
 changes) and logs the last several runs so they're easy to compare.
 """
 
+import gc
 import tempfile
 from pathlib import Path
 
@@ -19,18 +20,39 @@ import torch
 from PIL import Image
 
 from bench_realtime import CONFIGS
+from sam3_runner import Sam3ImageTracker, Sam3Runner
 from video_runner import Sam3VideoTracker, load_frames, open_writer
 from viz import draw_instances
 from yoloe_runner import HybridVideoTracker, YoloeVideoTracker
 
-print("Loading SAM 3 video model...")
-tracker = Sam3VideoTracker()
+# The webcam tab preloads this config, so it must stay in sync with the config
+# dropdown's default: get_bench_tracker() hands back this instance rather than loading a
+# second copy. fp16 is ~2.3x faster in the recorded benchmarks; quality still needs
+# a same-clip comparison (see temp-devlog.md). fp32 remains selectable.
+DEFAULT_CONFIG = next((c for c in CONFIGS if c.name == "fp16 autocast, 1008px"), None)
+assert DEFAULT_CONFIG is not None, "renamed a config in bench_realtime.CONFIGS?"
+
+
+def _build_tracker(cfg) -> Sam3VideoTracker:
+    return Sam3VideoTracker(
+        dtype=cfg.dtype,
+        processor_size=cfg.processor_size,
+        use_device_map=cfg.use_device_map,
+        compile_model=cfg.compile_model,
+        cudnn_benchmark=cfg.cudnn_benchmark,
+        max_cond_frame_num=cfg.max_cond_frame_num,
+    )
+
+
+print(f"Loading SAM 3 video model ({DEFAULT_CONFIG.name})...")
+tracker = _build_tracker(DEFAULT_CONFIG)
 print(f"Ready on {tracker.device} ({tracker.load_seconds:.1f}s)")
 
 MODEL_SAM3 = "SAM3"
+MODEL_SAM3_IMG = "SAM3 image + ByteTrack"
 MODEL_YOLOE = "YOLOE (text prompt)"
 MODEL_HYBRID = "Hybrid (SAM3 seed -> YOLOE track)"
-MODEL_CHOICES = [MODEL_SAM3, MODEL_YOLOE, MODEL_HYBRID]
+MODEL_CHOICES = [MODEL_SAM3, MODEL_SAM3_IMG, MODEL_YOLOE, MODEL_HYBRID]
 
 # Webcam tab: one extra SAM3 config may be cached alongside `tracker` so switching between
 # the baseline and one alternate is instant; switching to a different alternate reloads.
@@ -38,13 +60,16 @@ MODEL_CHOICES = [MODEL_SAM3, MODEL_YOLOE, MODEL_HYBRID]
 _bench_cache: dict[str, Sam3VideoTracker] = {}
 _yoloe_tracker: YoloeVideoTracker | None = None
 _hybrid_tracker: HybridVideoTracker | None = None
+# The image model is a separate ~3GB set of weights from the video model above, so it
+# loads on first use rather than at import — pick another backend and you never pay it.
+_sam3_image_tracker: Sam3ImageTracker | None = None
 
 
 def get_bench_tracker(config_name: str) -> Sam3VideoTracker:
-    cfg = next((c for c in CONFIGS if c.name == config_name), CONFIGS[0])
+    cfg = next((c for c in CONFIGS if c.name == config_name), DEFAULT_CONFIG)
     # cuDNN's flag is global, so reapply it even when selecting a cached tracker.
     torch.backends.cudnn.benchmark = cfg.cudnn_benchmark
-    if cfg.name == CONFIGS[0].name:
+    if cfg.name == DEFAULT_CONFIG.name:
         return tracker  # already loaded — avoid a redundant ~2GB VRAM copy
 
     if config_name not in _bench_cache:
@@ -52,21 +77,33 @@ def get_bench_tracker(config_name: str) -> Sam3VideoTracker:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         print(f"Loading webcam benchmark config: {cfg.name} ...")
-        _bench_cache[config_name] = Sam3VideoTracker(
-            dtype=cfg.dtype,
-            processor_size=cfg.processor_size,
-            use_device_map=cfg.use_device_map,
-            compile_model=cfg.compile_model,
-            cudnn_benchmark=cfg.cudnn_benchmark,
-            max_cond_frame_num=cfg.max_cond_frame_num,
-        )
+        _bench_cache[config_name] = _build_tracker(cfg)
     return _bench_cache[config_name]
 
 
 def get_active_tracker(model_choice: str, config_name: str):
     """Returns (tracker, label) for whichever backend is selected. label goes in the
     status line and run log so entries stay distinguishable across all three backends."""
-    global _yoloe_tracker, _hybrid_tracker
+    global _yoloe_tracker, _hybrid_tracker, _sam3_image_tracker
+
+    if model_choice == MODEL_SAM3_IMG:
+        if _sam3_image_tracker is None:
+            print("Loading SAM 3 image model (separate weights from the video model)...")
+            _sam3_image_tracker = Sam3ImageTracker(Sam3Runner(dtype=torch.float16))
+        return _sam3_image_tracker, MODEL_SAM3_IMG
+
+    # A second full copy of SAM3 lives here, so release it when another backend is
+    # picked. Three resident copies overflow a 12GB card, and the driver then spills to
+    # system RAM instead of failing — which reads as the whole app freezing. Same trade
+    # as the config cache above: switching back reloads.
+    if _sam3_image_tracker is not None:
+        _sam3_image_tracker = None
+        # gc.collect() before empty_cache(): the model's modules and accelerate hooks
+        # form reference cycles, so dropping the name alone leaves the weights alive and
+        # empty_cache() finds nothing to return. Without this the release is a no-op.
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     if model_choice == MODEL_YOLOE:
         if _yoloe_tracker is None:
@@ -179,8 +216,10 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
                 yield None, f"Tracking failed on '{label}': {e}", run_state
                 return
 
-            # obj_id can be None for a not-yet-confirmed ByteTrack detection (YOLOE/Hybrid
-            # backends) — real on live, moving footage, doesn't show up on a static frame.
+            # obj_id can be None for a detection the tracker hasn't confirmed yet — ByteTrack
+            # on the SAM3-image backend, and whatever ultralytics defaults to for YOLOE/Hybrid
+            # (TRACKTRACK as of 8.4.138, not ByteTrack). Shows up on live motion, not on a
+            # static frame.
             run_state["ids"].update(i.obj_id for i in instances if i.obj_id is not None)
             run_state["times"].append(ms)
             run_state["counts"].append(len(instances))
@@ -199,6 +238,14 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
             ), run_state
     finally:
         capture.release()
+        # The SAM3 session holds its memory bank and vision-feature cache on the GPU.
+        # Stop cancels this generator rather than letting it return, so without an
+        # explicit reset every start/stop cycle strands a run's worth of VRAM and the
+        # app degrades after a few rounds. The dict-based backends have nothing to free.
+        if hasattr(session, "reset_inference_session"):
+            session.reset_inference_session()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def format_log(history: list[str]) -> str:
@@ -252,12 +299,21 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
 
         with gr.Tab("Webcam (live)"):
             gr.Markdown(
-                "Live feed with tracking drawn on it. Three backends to compare:\n"
+                "Live feed with tracking drawn on it. Four backends to compare:\n"
                 "- **SAM3** — reliable text-prompt grounding, tracks through rotation/angle "
-                "changes because it keeps a memory of the object, not just detection: at "
-                "steady state (after ~7-8 frames, once its memory bank fills) it settles "
-                "around **~1 fps** regardless of config — the ramp-up you'll see at the "
-                "start looks faster but isn't the real number.\n"
+                "changes because it keeps a memory of the object, not just detection. "
+                "The latest pen run reported one distinct id; that alone does not "
+                "verify two-object tracking. Cost "
+                "is **~207ms + ~70ms per tracked object** at fp16, so **~3.6 fps on one "
+                "object** and ~1 fps on a plate of 13. fp32 is ~2.3x slower throughout. "
+                "Per-frame cost ramps over the first ~7-8 frames as the memory bank "
+                "fills, so early numbers look better than the real one.\n"
+                "- **SAM3 image + ByteTrack** — same vocabulary and masks, but re-detects "
+                "every frame instead of keeping a memory, and assigns ids by box overlap. "
+                "**~4.3 fps**, no warm-up ramp. The trade: ids only survive while the object "
+                "moves less than about half its own width per frame (measured: stable at "
+                "16px/frame, lost by 32px). Move something slowly first, then speed up and "
+                "watch the id list churn — that's the limit you're testing for.\n"
                 "- **YOLOE (text prompt)** — faster text-based detection; recognition of "
                 "specific food nouns needs retesting after a color-handling fix.\n"
                 "- **Hybrid** — SAM3 finds the objects once, then YOLOE tracks using "
@@ -277,7 +333,7 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
             with gr.Row():
                 w_model = gr.Dropdown(choices=MODEL_CHOICES, value=MODEL_SAM3, label="Model")
                 w_config = gr.Dropdown(
-                    choices=[c.name for c in CONFIGS], value=CONFIGS[0].name,
+                    choices=[c.name for c in CONFIGS], value=DEFAULT_CONFIG.name,
                     label="SAM3 config (ignored unless Model = SAM3)",
                 )
             with gr.Row():

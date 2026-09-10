@@ -86,9 +86,12 @@ otherwise need several GB. Writes `<video>_<prompt>.mp4` next to the source.
 Or use the UI (`run_sam_vid.cmd` from the repo root), which has two tabs:
 
 - **Video file** — the offline path above, better quality.
-- **Webcam (live)** — streaming inference with three selectable backends (see
+- **Webcam (live)** — streaming inference with four selectable backends (see
   below), plus a **SAM3 config** dropdown (precision/dispatch/conditioning-frame
   knobs — same options as `bench_realtime.py`, only used when Model = SAM3).
+  Defaults to **SAM3 / fp16 autocast, 1008px**, reusing the model loaded at
+  startup. The video-file tab and Hybrid's SAM3 seed share that fp16 model;
+  fp32 remains selectable for webcam comparisons.
   Stop logs that run's fps/ms/hit-rate into a rolling log of the last 8 runs,
   so you can flip backends/configs and compare by eye against a real moving
   object instead of only trusting fixed-clip numbers. Switching model/config
