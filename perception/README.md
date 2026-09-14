@@ -86,7 +86,7 @@ otherwise need several GB. Writes `<video>_<prompt>.mp4` next to the source.
 Or use the UI (`run_sam_vid.cmd` from the repo root), which has two tabs:
 
 - **Video file** — the offline path above, better quality.
-- **Webcam (live)** — streaming inference with four selectable backends (see
+- **Webcam (live)** — streaming inference with five selectable backends (see
   below), plus a **SAM3 config** dropdown (precision/dispatch/conditioning-frame
   knobs — same options as `bench_realtime.py`, only used when Model = SAM3).
   Defaults to **SAM3 / fp16 autocast, 1008px**, reusing the model loaded at
@@ -106,6 +106,12 @@ Or use the UI (`run_sam_vid.cmd` from the repo root), which has two tabs:
 First ever run downloads ~3.5 GB of model weights to the Hugging Face cache.
 
 ## Model backends (webcam tab)
+
+**DARTF (native SAM3, FP16 TensorRT)** is an experimental Docker backend with
+locally built engines. Real inference and a synthetic translation/restart smoke
+check pass; live tracking quality still needs evaluation. See
+[DARTF setup and remaining checks](dartf/README.md). It runs full-memory SAM3
+tracking with an FP16 TensorRT detector, without the upstream W8A8 INT8 recipe.
 
 `yoloe_runner.py` adds two alternatives to SAM3, evaluated after finding SAM3
 plateaus around 1 fps at steady state regardless of config (see below):

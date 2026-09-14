@@ -3,11 +3,44 @@
 Running log, newest first. One entry per session: what changed, what it means,
 what's next. For *what we're building*, see [SPECS.md](SPECS.md).
 
-Perception research to date lives in [temp-devlog.md](temp-devlog.md) — model
-measurements and the four tracking options. It predates this log and will be
-folded in when the copy on the other machine is merged.
+Detailed perception measurements and tracking experiments live in
+[temp-devlog.md](temp-devlog.md).
 
 ---
+
+## 2026-09-14 — fp16 default and optional DARTF experiment
+
+**SAM3 now starts with `fp16 autocast, 1008px`.** The preload and webcam dropdown
+agree; fp32 remains selectable. SAM3 image + ByteTrack and this default fix were
+committed and pushed as `60fe315` on `sam3-image-bytetrack`.
+
+The six pen runs are recorded in [temp-devlog.md](temp-devlog.md). SAM3 fp16
+reported 3.8 fps, image + ByteTrack 4.5 fps, Hybrid 21.6 fps and text YOLOE
+31.7 fps. These used different frames. Hit counts and distinct IDs do not prove
+that both pens kept their identities, so the final tracking choice remains open.
+
+**Added DARTF to the webcam menu on branch `dartf`, as an optional experiment.**
+It uses a separate GPU Docker process, local FP16 TensorRT engines and the native
+SAM3 memory tracker. The Windows environment and existing backend defaults stay
+intact. This is the full-memory FP16 reference path; W8A8 calibration and custom
+INT8 plugins are outside this experiment. Setup and resume commands are in
+[perception/dartf/README.md](perception/dartf/README.md).
+
+**Validation:** all 17 unit tests pass, covering the existing YOLOE/Hybrid
+regressions and DARTF packet handling, instance conversion and worker cleanup.
+A model-stubbed UI check verifies the fp16 default and camera release when
+startup fails. Docker GPU access, ONNX exports and all six TensorRT engines
+succeeded on the RTX 5070. The real `tests/smoke_dartf.py` check also passes:
+13 confirmed IDs persist through the translated meatball image, masks and
+overlays have the expected dimensions, and a fresh stream restarts IDs at 1.
+The last four frames average 549 ms (1.8 fps), including Windows/Docker transfer.
+This 13-object synthetic test does not establish live two-pen performance or
+identity correctness through occlusion.
+
+**Next:** compare the backends on the same recorded two-object
+clip with crossing, rotation and occlusion. Keep SAM3 fp16 as the default while
+these checks remain open. Quest transport and pixel-to-world projection still
+need implementation.
 
 ## 2026-09-09 — widget scaffold, and no on-device inference
 

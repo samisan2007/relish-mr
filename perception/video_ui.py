@@ -52,7 +52,8 @@ MODEL_SAM3 = "SAM3"
 MODEL_SAM3_IMG = "SAM3 image + ByteTrack"
 MODEL_YOLOE = "YOLOE (text prompt)"
 MODEL_HYBRID = "Hybrid (SAM3 seed -> YOLOE track)"
-MODEL_CHOICES = [MODEL_SAM3, MODEL_SAM3_IMG, MODEL_YOLOE, MODEL_HYBRID]
+MODEL_DARTF = "DARTF (native SAM3, FP16 TensorRT)"
+MODEL_CHOICES = [MODEL_SAM3, MODEL_SAM3_IMG, MODEL_YOLOE, MODEL_HYBRID, MODEL_DARTF]
 
 # Webcam tab: one extra SAM3 config may be cached alongside `tracker` so switching between
 # the baseline and one alternate is instant; switching to a different alternate reloads.
@@ -83,7 +84,7 @@ def get_bench_tracker(config_name: str) -> Sam3VideoTracker:
 
 def get_active_tracker(model_choice: str, config_name: str):
     """Returns (tracker, label) for whichever backend is selected. label goes in the
-    status line and run log so entries stay distinguishable across all three backends."""
+    status line and run log so entries stay distinguishable across backends."""
     global _yoloe_tracker, _hybrid_tracker, _sam3_image_tracker
 
     if model_choice == MODEL_SAM3_IMG:
@@ -104,6 +105,11 @@ def get_active_tracker(model_choice: str, config_name: str):
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    if model_choice == MODEL_DARTF:
+        from dartf_runner import DartfVideoTracker
+
+        return DartfVideoTracker(), MODEL_DARTF
 
     if model_choice == MODEL_YOLOE:
         if _yoloe_tracker is None:
@@ -199,10 +205,14 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
                      "browser tab using it, or try a different index."), run_state
         return
 
-    session = cam_tracker.start_stream(prompt.strip())
-    run_state = {"label": label, "prompt": prompt.strip(), "times": [], "counts": [], "ids": set()}
-
+    session = None
     try:
+        try:
+            session = cam_tracker.start_stream(prompt.strip())
+        except Exception as e:
+            yield None, f"Failed to start '{label}': {e}", run_state
+            return
+        run_state = {"label": label, "prompt": prompt.strip(), "times": [], "counts": [], "ids": set()}
         while True:
             ok, frame_bgr = capture.read()
             if not ok:
@@ -299,7 +309,7 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
 
         with gr.Tab("Webcam (live)"):
             gr.Markdown(
-                "Live feed with tracking drawn on it. Four backends to compare:\n"
+                "Live feed with tracking drawn on it. Five backends to compare:\n"
                 "- **SAM3** — reliable text-prompt grounding, tracks through rotation/angle "
                 "changes because it keeps a memory of the object, not just detection. "
                 "The latest pen run reported one distinct id; that alone does not "
@@ -318,7 +328,10 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
                 "specific food nouns needs retesting after a color-handling fix.\n"
                 "- **Hybrid** — SAM3 finds the objects once, then YOLOE tracks using "
                 "their original appearance as a reference. The reference handoff has "
-                "been corrected; live rotation and occlusion still need testing.\n\n"
+                "been corrected; live rotation and occlusion still need testing.\n"
+                "- **DARTF** — experimental FP16 TensorRT detection and native SAM3 memory "
+                "tracking through Docker. Requires the DARTF setup and locally built "
+                "engines; each Start opens a fresh tracker and Stop releases it.\n\n"
                 "Streaming disables the heuristics that prune duplicate tracks, so expect "
                 "more false positives than the file tab. The camera must be free — close "
                 "any browser tab or app already using it. Changing model/config only takes "

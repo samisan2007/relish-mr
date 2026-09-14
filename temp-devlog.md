@@ -1,5 +1,37 @@
 # Real-time food tracking — findings, progress, options
 
+## DARTF FP16 menu integration — checkpoint, 2026-09-14
+
+The SAM3 image/ByteTrack work and fp16 default are committed and pushed as
+`60fe315` on `sam3-image-bytetrack`. The DARTF experiment is on branch `dartf`.
+
+Docker can access this machine's RTX 5070 (SM120). The new menu backend uses a
+separate Linux process with an FP16 TensorRT backbone, detector, mask head and
+DARTF native memory tracker. It keeps full memory and batches at most two
+objects per engine call; larger sets are processed in chunks. This is the
+FP16 reference path, not the calibrated W8A8 recipe.
+
+The official Meta-format checkpoint is downloaded. The setup exports a named
+backbone trunk, the text encoder and the missing temporal-position buffer before
+building local engines. Reproduction instructions are in
+[perception/dartf/README.md](perception/dartf/README.md).
+
+Validation so far: all 17 regressions pass; a model-stubbed UI check confirms the
+fp16 default, the DARTF menu entry and camera release after startup failure.
+The Docker image builds and ONNX exports complete. The text encoder numerical
+comparison and phase-convolution mask-head comparison pass. A backbone output
+name collision was fixed by exporting `tracker_trunk` and checking the ONNX graph.
+All six TensorRT engines have built successfully (vision, grounding, mask head,
+tracker neck, tracker initialization and propagation).
+The real `tests/smoke_dartf.py` translation/restart test passes on
+`Media/meatballs_img.jpg` with prompt `meatball`: frames 2-11 retain 13 confirmed
+IDs, output masks and overlays have the expected dimensions, and the second
+stream restarts IDs at 1. The last four frames average 549 ms (1.8 fps), including
+Windows/Docker transfer. This is a synthetic 13-object test, not a two-pen or
+occlusion benchmark; live identity quality remains open. All local engines are
+ready, so restart the UI to test the DARTF menu entry. Rerun the documented build
+command if setup is interrupted elsewhere; successful exports and plans are reused.
+
 ## Backend comparison on the webcam, one or two pens — 2026-09-10
 
 Six separate webcam runs with prompt "pen", holding one and/or two pens,

@@ -31,14 +31,21 @@ does the seeing.
 - **No on-device inference.** The Meta Image Segmentation building block only
   offers Yolo11n-seg — 80 fixed COCO classes, no food nouns. Rejected 2026-09-09.
 - **Perception runs on the PC** in Python (`perception/`), against SAM3 and YOLOE.
+- **The test UI defaults to SAM3 video, `fp16 autocast, 1008px`.** This is the
+  current testing default, not a final production tracking choice.
 - **The widget is decoupled from perception.** `PortionWidget` takes a world
   position and a diameter in metres and knows nothing about how they were derived.
 
 ### Open
 
-- **Tracking approach.** SAM3 is the only reliable backend and runs at ~1 fps;
-  every faster option tested loses the object under motion. Four options are
-  written up in [temp-devlog.md](temp-devlog.md); none is chosen.
+- **Tracking approach.** No final backend is chosen. Recent pen runs report
+  SAM3 fp16 at 3.8 fps, image + ByteTrack at 4.5 fps, Hybrid at 21.6 fps and
+  text YOLOE at 31.7 fps. Those runs used different frames, and neither hit
+  counts nor distinct IDs establish correct two-object tracking. Compare the
+  same recorded clip through crossing, rotation and occlusion; measurements
+  and limitations are in [temp-devlog.md](temp-devlog.md). DARTF is an optional
+  experiment with a passing synthetic translation/restart check; live tracking
+  quality still needs evaluation.
 - **Quest ↔ PC transport.** Not built. No protocol, no codec, no latency budget.
 - **Where the widget gets anchored.** Screen-space projection of the mask
   centroid, a depth hit, or an MRUK anchor — undecided.
@@ -53,7 +60,7 @@ does the seeing.
 |---|---|
 | `Scripts/PortionWidget.cs` | The widget. Sphere sized in real-world metres, minimize/restore, success pulse, stale dim, debug label + gizmos. |
 | `Scripts/Hands.cs` | Finds the hand-tracking hands so nothing else hunts for the rig. Pose, pinch, pinch point. |
-| `Scripts/PortionWidgets.cs` | The manager. `Report(frame)` of `Detection { Id, Position, Diameter, Score }` → spawns, lerps between ~1 fps reports, dims stale, retires lost. `Detection` is the contract with perception. |
+| `Scripts/PortionWidgets.cs` | The manager. `Report(frame)` of `Detection { Id, Position, Diameter, Score }` → spawns, lerps between reports, dims stale, retires lost. `Detection` is the contract with perception. |
 | `Editor/RelishWidgetBuilder.cs` | `Relish > Create Widget Prefab` — generates the prefab and its transparent URP material. |
 | `Editor/ContextMenuButtonsEditor.cs` | Turns every `[ContextMenu]` test method on the two scripts into an inspector button (Play mode only). |
 
@@ -64,3 +71,19 @@ The widget is a sphere *for now*. The API is the contract; the mesh is not.
 `perception/` — SAM3 image + video testers, YOLOE trackers, a replay benchmark,
 and a webcam UI that switches backends. See [temp-devlog.md](temp-devlog.md) for
 the measurements and the reasoning behind them.
+
+The webcam menu offers SAM3 video, SAM3 image + ByteTrack, YOLOE text, Hybrid
+(SAM3 seed to YOLOE), and experimental DARTF. All adapters return a per-frame
+`list[Instance]` containing a pixel mask, box, confidence and optional object ID.
+This does not yet supply Unity's world position or diameter.
+
+DARTF is optional and loads only when selected. Its native SAM3 memory tracker
+and FP16 TensorRT detector run in a GPU Linux Docker container; the Windows
+process handles camera capture and overlays. Engines must be built locally for
+the GPU/runtime. Full memory is retained, with additional objects processed in
+batches of two. This experiment does not implement the upstream W8A8 recipe.
+Missing assets or startup failures must produce a UI error and release the
+camera. Real inference, mask transfer and restart pass the synthetic smoke
+check. See [setup and validation](perception/dartf/README.md); identity continuity
+through real motion and occlusion still needs evaluation before recommending
+this backend.

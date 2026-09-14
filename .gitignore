@@ -16,6 +16,10 @@ Test Data/
 *.pt
 *.pth
 *.onnx
+*.onnx.data
+*.plan
+*.plan.layers.json
+*.engine
 perception/*.ts
 
 # Media / run outputs
