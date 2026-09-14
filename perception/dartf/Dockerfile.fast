@@ -1,0 +1,32 @@
+FROM relish-dartf:local
+
+# A separate image: the working FP16 webcam environment stays available.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-lato \
+    && rm -rf /var/lib/apt/lists/*
+RUN git -c http.version=HTTP/1.1 clone https://github.com/mkturkcan/DART.git /opt/dart \
+    && git -C /opt/dart checkout 16fada39054ac5058f6e7c1e8748cb9cc288f90c \
+    && git -c http.version=HTTP/1.1 clone --depth 1 --branch v3.5.1 \
+       https://github.com/NVIDIA/cutlass.git /opt/cutlass
+RUN cd /opt/dart/dartf/plugins && ARCH=86 STAGES=3 \
+    CPATH=/opt/cutlass/tools/util/include \
+    CUTLASS=/opt/cutlass/include TRT_INC=/usr/include/x86_64-linux-gnu \
+    TRT_LIB=/usr/lib/x86_64-linux-gnu bash build.sh
+
+# Upstream otherwise asks for the moving HF main revision, even in offline mode.
+RUN python - <<'PY'
+from pathlib import Path
+root = Path('/opt/dart')
+for name, count in [('scripts/export_hf_backbone.py', 7),
+                    ('dartf/export/export_hf_had_nowin.py', 1),
+                    ('dartf/quant/gptq_actaware.py', 1)]:
+    path = root / name
+    source = path.read_text()
+    assert source.count('"facebook/sam3"') == count, name
+    path.write_text(source.replace('"facebook/sam3"',
+        '"facebook/sam3", revision="3c879f39826c281e95690f02c7821c4de09afae7"'))
+PY
+
+ENV PYTHONPATH=/opt/dart:/opt/dart/dartf/runtime:/opt/dart/dartf/export \
+    LQ_PLUGINS=/opt/dart/dartf/plugins/lq_plugins.so \
+    OMP_NUM_THREADS=8
+WORKDIR /opt/dart

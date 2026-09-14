@@ -1,5 +1,26 @@
 # Real-time food tracking — findings, progress, options
 
+## RTX 3080 FAST preparation — 2026-09-14
+
+The 1.8 fps native FP16 smoke result does not measure upstream's FAST recipe.
+Prepared a separate W8A8 + fused-head + lightweight-tracker + pipeline test for
+the home SM86 RTX 3080. See [the home checklist](perception/dartf/RTX3080.md).
+SM86 plugins compile here after adding the CUTLASS utility include directory;
+the launcher correctly rejects this SM120 RTX 5070 for target engine builds.
+Pinned checkpoint and all 19 COCO calibration/check images download correctly
+from the official sources. Twenty-two unit tests pass. Backbone, text and fused
+mask-head CPU exports, ONNX validation, all 32 blocks' quantization-site counts,
+three FP32 reference outputs and a one-block GPTQ smoke check pass. The backbone
+rewrite relative L2 error is 5.789e-06. Full GPTQ, INT8 graph rewriting, SM86
+engine building, numerical verification and inference await home testing.
+
+FAST uses upstream's published activation scales with GPTQ regenerated on its
+16 calibration images. Three separate images are reserved for a coarse FP32
+backbone comparison. This avoids the large all-intermediate-output calibration
+engine; it does not replace the need to inspect masks and identities on the pen
+clip. Compare the same frames and count identity changes by inspection, rather
+than interpreting distinct IDs or playback FPS as tracking quality or speed.
+
 ## DARTF FP16 menu integration — checkpoint, 2026-09-14
 
 The SAM3 image/ByteTrack work and fp16 default are committed and pushed as

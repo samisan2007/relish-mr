@@ -107,6 +107,10 @@ First ever run downloads ~3.5 GB of model weights to the Hugging Face cache.
 
 ## Model backends (webcam tab)
 
+For the separate optimized DARTF FAST test on an RTX 3080, use the
+[home setup and recorded-video launcher](dartf/RTX3080.md). The webcam DARTF
+entry below remains the native FP16 mode.
+
 **DARTF (native SAM3, FP16 TensorRT)** is an experimental Docker backend with
 locally built engines. Real inference and a synthetic translation/restart smoke
 check pass; live tracking quality still needs evaluation. See

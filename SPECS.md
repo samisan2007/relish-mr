@@ -87,3 +87,11 @@ camera. Real inference, mask transfer and restart pass the synthetic smoke
 check. See [setup and validation](perception/dartf/README.md); identity continuity
 through real motion and occlusion still needs evaluation before recommending
 this backend.
+
+A separate [RTX 3080 FAST experiment](perception/dartf/RTX3080.md) prepares the
+W8A8 detector, fused mask head, lightweight tracker and frame pipeline. Its
+first test is a recorded-video run through the upstream pipeline, with separate
+headless and rendered timings plus saved IDs. It is not yet a webcam menu mode
+or a selected production backend. SM86 engine execution and tracking quality
+must be checked on the home GPU; the upstream RTX 4090 FPS claim is not a local
+performance target or guarantee.

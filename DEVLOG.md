@@ -8,6 +8,33 @@ Detailed perception measurements and tracking experiments live in
 
 ---
 
+## 2026-09-14 — RTX 3080 FAST handoff
+
+Prepared a separate DARTF FAST build and recorded-video test for the home RTX
+3080. [RTX3080.md](perception/dartf/RTX3080.md) has the commands: build the Docker
+images, log into Hugging Face, check the GPU, build engines and test a clip.
+The launcher saves headless timings, IDs and an optional annotated-video pass.
+The current webcam DARTF option remains the tested native FP16 backend; FAST is
+tested through its own launcher before further webcam integration.
+
+The FAST recipe uses the full W8A8 backbone, a fused single-prompt mask head,
+upstream lightweight tracking and pipelining. Source and model revisions are
+pinned. Shipped activation scales and all 16 upstream calibration images feed
+CPU GPTQ, avoiding a large GPU calibration engine. Assets and credentials stay
+under the ignored `perception/dartf-local/` directory. Engine builds reject the
+5070 and previously cached plans from another GPU/runtime.
+
+Validation: the SM86 Docker image and custom CUDA plugins compile on this PC;
+the missing CUTLASS utility include path was corrected. The pinned weights and
+all 19 calibration/check images download successfully. All 22 unit tests pass,
+including the existing backend regressions, GPU guards and launcher argument
+handling. Backbone, text and fused-head CPU exports pass, along with ONNX
+validation, all 32 blocks' quantization-site counts, three FP32 references and
+a one-block GPTQ smoke check. The backbone rewrite relative L2 error is
+5.789e-06. Full GPTQ and INT8 graph rewriting, target TensorRT builds, numerical
+verification and FAST inference await the RTX 3080 at home. No 3080 FPS or
+accuracy claim is made.
+
 ## 2026-09-14 — fp16 default and optional DARTF experiment
 
 **SAM3 now starts with `fp16 autocast, 1008px`.** The preload and webcam dropdown

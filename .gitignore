@@ -21,6 +21,7 @@ Test Data/
 *.plan.layers.json
 *.engine
 perception/*.ts
+perception/dartf-local/
 
 # Media / run outputs
 *.mp4

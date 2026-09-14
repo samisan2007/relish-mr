@@ -1,5 +1,9 @@
 # DARTF webcam experiment
 
+For the optimized FAST experiment on the home RTX 3080, follow
+[RTX 3080 setup and recorded-video test](RTX3080.md). It has a separate image,
+asset directory and launcher; the native FP16 webcam setup below stays available.
+
 The webcam menu's **DARTF (native SAM3, FP16 TensorRT)** runs an FP16 TensorRT
 backbone, detector, segmentation head and SAM3 memory tracker in a GPU Docker
 container. It uses full memory (no spatial or query pruning). This is an FP16
