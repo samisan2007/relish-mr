@@ -338,8 +338,8 @@ def finalize_run(run_state, history, request: gr.Request = None):
 
 
 with gr.Blocks(title="Relish video tracker") as demo:
-    gr.Markdown("# Relish video tracker\n"
-                "Tracks every instance of a concept, keeping stable IDs across frames.")
+    gr.Markdown("### Relish video tracker\n"
+                "Name a thing. Every instance gets a mask and an ID that survives across frames.")
 
     with gr.Tabs():
         with gr.Tab("Video file"):
@@ -348,9 +348,8 @@ with gr.Blocks(title="Relish video tracker") as demo:
                     f_video = gr.Video(label="Video")
                     f_prompt = gr.Textbox(label="Prompt", placeholder="mug")
                     f_model = gr.Dropdown(choices=[MODEL_SAM3, *SAM31_CHOICES, MODEL_DARTF], value=MODEL_SAM3, label="Model")
-                    gr.Markdown("SAM 3.1 and DARTF use the same forward-only tracker as live mode, so a "
-                                "file replay is comparable to their webcam runs. Compiled startup can take "
-                                "several minutes. Use stride 1 to match a consecutive-frame benchmark.")
+                    gr.Markdown("Stride 1 for a benchmark comparable to a live run. "
+                                "Compiled startup takes minutes.")
                     f_frames = gr.Slider(10, 700, value=60, step=10, label="Frames to sample")
                     f_stride = gr.Slider(1, 10, value=3, step=1, label="Stride (every Nth frame)")
                     f_masks = gr.Checkbox(value=True, label="Segmentation masks")
@@ -364,39 +363,23 @@ with gr.Blocks(title="Relish video tracker") as demo:
                         [f_out, f_info], concurrency_id="perception-gpu", concurrency_limit=1)
 
         with gr.Tab("Webcam (live)"):
-            gr.Markdown(
-                "Live feed with tracking drawn on it. Backends to compare:\n"
-                "- **SAM 3.1** — Object Multiplex tracking, up to 16 regions. Normal mode starts faster; "
-                "compiled mode can spend several minutes preparing its first frames. "
-                "Food recognition, occlusion and live speed are still being evaluated.\n"
-                "- **SAM3** — reliable text-prompt grounding, tracks through rotation/angle "
-                "changes because it keeps a memory of the object, not just detection. "
-                "The latest pen run reported one distinct id; that alone does not "
-                "verify two-object tracking. Cost "
-                "is **~207ms + ~70ms per tracked object** at fp16, so **~3.6 fps on one "
-                "object** and ~1 fps on a plate of 13. fp32 is ~2.3x slower throughout. "
-                "Per-frame cost ramps over the first ~7-8 frames as the memory bank "
-                "fills, so early numbers look better than the real one.\n"
-                "- **SAM3 image + ByteTrack** — same vocabulary and masks, but re-detects "
-                "every frame instead of keeping a memory, and assigns ids by box overlap. "
-                "**~4.3 fps**, no warm-up ramp. The trade: ids only survive while the object "
-                "moves less than about half its own width per frame (measured: stable at "
-                "16px/frame, lost by 32px). Move something slowly first, then speed up and "
-                "watch the id list churn — that's the limit you're testing for.\n"
-                "- **YOLOE (text prompt)** — faster text-based detection; recognition of "
-                "specific food nouns needs retesting after a color-handling fix.\n"
-                "- **Hybrid** — SAM3 finds the objects once, then YOLOE tracks using "
-                "their original appearance as a reference. The reference handoff has "
-                "been corrected; live rotation and occlusion still need testing.\n"
-                "- **DARTF** — experimental FP16 TensorRT detection and native SAM3 memory "
-                "tracking through Docker. Requires the DARTF setup and locally built "
-                "engines; each Start opens a fresh tracker and Stop releases it.\n\n"
-                "Streaming disables the heuristics that prune duplicate tracks, so expect "
-                "more false positives than the file tab. The camera must be free — close "
-                "any browser tab or app already using it. Changing model/config only takes "
-                "effect on the next Start (Stop first); the first use of a new one pays a "
-                "load cost (~5-10s SAM3 config, longer for YOLOE's first-ever download)."
-            )
+            gr.Markdown("Live tracking. Free the camera first; Stop before changing model or config.")
+            with gr.Accordion("Backends", open=False):
+                gr.Markdown(
+                    """
+| Backend | Notes |
+|---|---|
+| SAM 3.1 | Object Multiplex, up to 16 regions. Compiled mode is slow to start. |
+| SAM3 | Text grounding with object memory; survives rotation. Warms up over ~8 frames. |
+| SAM3 image + ByteTrack | No memory — re-detects per frame, IDs by overlap. Drops IDs on fast motion. |
+| YOLOE | Fast text detection; weak on specific food nouns. |
+| Hybrid | SAM3 seeds once, then YOLOE tracks. |
+| DARTF | FP16 TensorRT + native SAM3 memory, via Docker. Needs locally built engines. |
+
+Streaming keeps duplicate tracks the file tab would prune, so expect more false
+positives here. Measurements live in `temp-devlog.md`.
+"""
+                )
             w_view = gr.Image(label="Live", type="numpy", height=520)
             w_info = gr.Textbox(label="Status", lines=2)
             with gr.Row():
@@ -435,4 +418,4 @@ with gr.Blocks(title="Relish video tracker") as demo:
             )
 
 if __name__ == "__main__":
-    demo.launch(server_port=7861, inbrowser=True)
+    demo.launch(server_port=7861, inbrowser=True, theme=gr.themes.Soft())

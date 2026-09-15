@@ -61,9 +61,9 @@ demo = gr.Interface(
     ],
     outputs=[gr.Image(label="Segmentation"), gr.Textbox(label="Results", lines=10)],
     title="Relish image tester",
-    description="Choose a model and type a noun phrase. First use loads the model; SAM 3.1 compiled can take several minutes.",
+    description="Type a noun phrase. First use of a model loads it; SAM 3.1 compiled takes minutes.",
     flagging_mode="never",
 )
 
 if __name__ == "__main__":
-    demo.launch(inbrowser=True)
+    demo.launch(inbrowser=True, theme=gr.themes.Soft())
