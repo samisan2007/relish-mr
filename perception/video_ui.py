@@ -1,16 +1,16 @@
-"""Interactive SAM 3 video tester: a clip from disk, or a live webcam feed.
+"""Interactive video tester: a clip from disk, or a live webcam feed.
 
     python video_ui.py    ->  opens http://127.0.0.1:7861
 
-Separate port from ui.py so the image and video testers can run side by side.
-Both tabs use the same Sam3VideoModel; the file tab runs the offline path
-(better quality). The webcam tab runs streaming inference and lets you pick
-a speed/quality config per run (see bench_realtime.py for what each one
-changes) and logs the last several runs so they're easy to compare.
+Separate port from ui.py. Models load on selection; run one GPU test at a time.
+SAM3 files use offline propagation. SAM 3.1 files and webcam use the same causal
+Docker worker. Webcam runs are logged for comparison.
 """
 
 import gc
 import tempfile
+import time
+import threading
 from pathlib import Path
 
 import cv2
@@ -21,14 +21,12 @@ from PIL import Image
 
 from bench_realtime import CONFIGS
 from sam3_runner import Sam3ImageTracker, Sam3Runner
+from sam31_runner import MODEL_SAM31_COMPILED, SAM31_CHOICES, Sam31Runner
 from video_runner import Sam3VideoTracker, load_frames, open_writer
 from viz import draw_instances
 from yoloe_runner import HybridVideoTracker, YoloeVideoTracker
 
-# The webcam tab preloads this config, so it must stay in sync with the config
-# dropdown's default: get_bench_tracker() hands back this instance rather than loading a
-# second copy. fp16 is ~2.3x faster in the recorded benchmarks; quality still needs
-# a same-clip comparison (see temp-devlog.md). fp32 remains selectable.
+# File mode and the default webcam config share one lazily loaded SAM3 instance.
 DEFAULT_CONFIG = next((c for c in CONFIGS if c.name == "fp16 autocast, 1008px"), None)
 assert DEFAULT_CONFIG is not None, "renamed a config in bench_realtime.CONFIGS?"
 
@@ -44,16 +42,14 @@ def _build_tracker(cfg) -> Sam3VideoTracker:
     )
 
 
-print(f"Loading SAM 3 video model ({DEFAULT_CONFIG.name})...")
-tracker = _build_tracker(DEFAULT_CONFIG)
-print(f"Ready on {tracker.device} ({tracker.load_seconds:.1f}s)")
+tracker = None  # Load on selection so Docker backends have the GPU available.
 
 MODEL_SAM3 = "SAM3"
 MODEL_SAM3_IMG = "SAM3 image + ByteTrack"
 MODEL_YOLOE = "YOLOE (text prompt)"
 MODEL_HYBRID = "Hybrid (SAM3 seed -> YOLOE track)"
 MODEL_DARTF = "DARTF (native SAM3, FP16 TensorRT)"
-MODEL_CHOICES = [MODEL_SAM3, MODEL_SAM3_IMG, MODEL_YOLOE, MODEL_HYBRID, MODEL_DARTF]
+MODEL_CHOICES = [MODEL_SAM3, *SAM31_CHOICES, MODEL_SAM3_IMG, MODEL_YOLOE, MODEL_HYBRID, MODEL_DARTF]
 
 # Webcam tab: one extra SAM3 config may be cached alongside `tracker` so switching between
 # the baseline and one alternate is instant; switching to a different alternate reloads.
@@ -64,14 +60,18 @@ _hybrid_tracker: HybridVideoTracker | None = None
 # The image model is a separate ~3GB set of weights from the video model above, so it
 # loads on first use rather than at import — pick another backend and you never pay it.
 _sam3_image_tracker: Sam3ImageTracker | None = None
+_webcam_runs = {}  # Live worker handles stay server-side, outside serializable gr.State.
 
 
 def get_bench_tracker(config_name: str) -> Sam3VideoTracker:
+    global tracker
     cfg = next((c for c in CONFIGS if c.name == config_name), DEFAULT_CONFIG)
     # cuDNN's flag is global, so reapply it even when selecting a cached tracker.
     torch.backends.cudnn.benchmark = cfg.cudnn_benchmark
     if cfg.name == DEFAULT_CONFIG.name:
-        return tracker  # already loaded — avoid a redundant ~2GB VRAM copy
+        if tracker is None:
+            tracker = _build_tracker(cfg)
+        return tracker
 
     if config_name not in _bench_cache:
         _bench_cache.clear()
@@ -85,7 +85,15 @@ def get_bench_tracker(config_name: str) -> Sam3VideoTracker:
 def get_active_tracker(model_choice: str, config_name: str):
     """Returns (tracker, label) for whichever backend is selected. label goes in the
     status line and run log so entries stay distinguishable across backends."""
-    global _yoloe_tracker, _hybrid_tracker, _sam3_image_tracker
+    global tracker, _yoloe_tracker, _hybrid_tracker, _sam3_image_tracker
+
+    if model_choice in SAM31_CHOICES:
+        tracker = _yoloe_tracker = _hybrid_tracker = _sam3_image_tracker = None
+        _bench_cache.clear()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return Sam31Runner(compile_model=model_choice == MODEL_SAM31_COMPILED), model_choice
 
     if model_choice == MODEL_SAM3_IMG:
         if _sam3_image_tracker is None:
@@ -120,7 +128,7 @@ def get_active_tracker(model_choice: str, config_name: str):
     if model_choice == MODEL_HYBRID:
         if _hybrid_tracker is None:
             print("Loading Hybrid (YOLOE side; SAM3 side reuses the baseline model)...")
-            _hybrid_tracker = HybridVideoTracker(sam3_tracker=tracker)
+            _hybrid_tracker = HybridVideoTracker(sam3_tracker=get_bench_tracker(DEFAULT_CONFIG.name))
         return _hybrid_tracker, MODEL_HYBRID
 
     cam_tracker = get_bench_tracker(config_name)
@@ -128,47 +136,59 @@ def get_active_tracker(model_choice: str, config_name: str):
 
 
 def run_file(video_path, prompt, max_frames, stride, show_masks, show_boxes,
-             progress=gr.Progress()):
+             model_choice=MODEL_SAM3, progress=gr.Progress()):
     if not video_path or not prompt.strip():
         return None, "Provide a video and a prompt."
 
-    frames, out_fps = load_frames(video_path, int(max_frames), int(stride))
+    started = time.perf_counter()
+    try:
+        active, label = get_active_tracker(model_choice, DEFAULT_CONFIG.name)
+        frames, out_fps = load_frames(video_path, int(max_frames), int(stride))
+    except Exception as error:
+        return None, f"Failed to load '{model_choice}': {error}"
     out_path = Path(tempfile.mkdtemp()) / "tracked.mp4"
 
     writer = None
     seen_ids: set[int] = set()
     counts = []
-
-    for result in progress.tqdm(
-        tracker.track(frames, prompt.strip()), total=len(frames), desc="Tracking"
-    ):
-        annotated = draw_instances(
-            result.image, result.instances, show_masks=show_masks, show_boxes=show_boxes
-        )
-        if writer is None:
-            writer = open_writer(out_path, out_fps)
-        writer.append_data(np.asarray(annotated))
-
-        seen_ids.update(i.obj_id for i in result.instances)
-        counts.append(len(result.instances))
-
-    if writer:
-        writer.close()
+    times = []
+    results = active.track(frames, prompt.strip())
+    try:
+        for result in progress.tqdm(results, total=len(frames), desc="Tracking"):
+            annotated = draw_instances(
+                result.image, result.instances, show_masks=show_masks, show_boxes=show_boxes
+            )
+            if writer is None:
+                writer = open_writer(out_path, out_fps)
+            writer.append_data(np.asarray(annotated))
+            seen_ids.update(i.obj_id for i in result.instances if i.obj_id is not None)
+            counts.append(len(result.instances))
+            times.append(result.inference_ms)
+    except Exception as error:
+        return None, f"Tracking failed on '{label}': {error}"
+    finally:
+        results.close()
+        if writer is not None:
+            writer.close()
+    elapsed = time.perf_counter() - started
 
     if not seen_ids:
-        return None, f'No "{prompt}" found in {len(frames)} frames.'
+        return str(out_path), f'[{label}] No "{prompt}" found in {len(frames)} frames.'
 
     return str(out_path), "\n".join([
-        f"{len(frames)} frames tracked at {out_fps:.1f} fps",
+        f"[{label}] {len(frames)} frames; playback {out_fps:.1f} fps",
+        f"Total processing: {elapsed:.1f}s ({len(frames) / elapsed:.2f} fps, including startup and encoding)",
+        *([f"Frame requests after first 8: {1000 / np.mean(times[8:]):.2f} fps (includes Docker transfer and any later compilation)"]
+          if model_choice in SAM31_CHOICES and len(times) > 8 else []),
         f"Distinct track IDs: {sorted(seen_ids)}",
         f"Objects per frame: min {min(counts)}, max {max(counts)}",
         "",
-        "An ID that disappears and returns with the same number means the",
-        "tracker re-acquired the object rather than treating it as new.",
+        "Inspect masks and IDs through motion and occlusion; ID counts alone do not verify identity.",
     ])
 
 
-def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, config_name, run_state):
+def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, config_name, run_state,
+                request: gr.Request = None):
     """Grab frames from the local camera and yield annotated ones, until cancelled.
 
     Capture happens server-side (OpenCV) rather than in the browser, so the feed
@@ -201,19 +221,36 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
     # step is a background capture thread instead of relying on this.
     capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not capture.isOpened():
+        capture.release()
         yield None, (f"Could not open camera {int(camera_index)}. Close any other app or "
                      "browser tab using it, or try a different index."), run_state
         return
 
     session = None
+    key = request.session_hash if request is not None else "local"
+    control = {"stop": threading.Event(), "session": None}
+    _webcam_runs[key] = control
+
+    def on_started(started_session):
+        control["session"] = started_session
+        if control["stop"].is_set():
+            started_session.failed = True
+            started_session.reset_inference_session()
+            raise RuntimeError("Stopped during startup")
+
     try:
+        yield None, f"Starting {label}; compiled first frames can take several minutes. Stop cancels the run.", {}
         try:
-            session = cam_tracker.start_stream(prompt.strip())
+            if isinstance(cam_tracker, Sam31Runner):
+                session = cam_tracker.start_stream(prompt.strip(), on_started=on_started)
+            else:
+                session = cam_tracker.start_stream(prompt.strip())
+                control["session"] = session
         except Exception as e:
             yield None, f"Failed to start '{label}': {e}", run_state
             return
         run_state = {"label": label, "prompt": prompt.strip(), "times": [], "counts": [], "ids": set()}
-        while True:
+        while not control["stop"].is_set():
             ok, frame_bgr = capture.read()
             if not ok:
                 yield None, "Lost the camera feed.", run_state
@@ -247,6 +284,8 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
                 f"{len(run_state['times'])} frames"
             ), run_state
     finally:
+        if _webcam_runs.get(key) is control:
+            del _webcam_runs[key]
         capture.release()
         # The SAM3 session holds its memory bank and vision-feature cache on the GPU.
         # Stop cancels this generator rather than letting it return, so without an
@@ -264,12 +303,20 @@ def format_log(history: list[str]) -> str:
     return "\n".join(f"{i}. {line}" for i, line in enumerate(reversed(history), 1))
 
 
-def finalize_run(run_state, history):
+def finalize_run(run_state, history, request: gr.Request = None):
     """Stop-button handler: summarize the just-ended run from `run_state` into the log.
 
     Reads accumulated stats out of state rather than the generator's own cleanup,
     since Gradio's cancellation doesn't let the generator return a final value.
     """
+    key = request.session_hash if request is not None else "local"
+    control = _webcam_runs.get(key)
+    if control is not None:
+        control["stop"].set()
+        session = control["session"]
+        if hasattr(session, "process"):
+            session.failed = True  # Interrupt a pending load/compile/frame request.
+            session.reset_inference_session()
     times = run_state.get("times") if run_state else None
     if not times:
         return "Stopped.", history, format_log(history), {}
@@ -285,8 +332,8 @@ def finalize_run(run_state, history):
     return "Stopped.", history, format_log(history), {}
 
 
-with gr.Blocks(title="SAM 3 video tracker") as demo:
-    gr.Markdown("# SAM 3 video tracker\n"
+with gr.Blocks(title="Relish video tracker") as demo:
+    gr.Markdown("# Relish video tracker\n"
                 "Tracks every instance of a concept, keeping stable IDs across frames.")
 
     with gr.Tabs():
@@ -295,6 +342,8 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
                 with gr.Column():
                     f_video = gr.Video(label="Video")
                     f_prompt = gr.Textbox(label="Prompt", placeholder="mug")
+                    f_model = gr.Dropdown(choices=[MODEL_SAM3, *SAM31_CHOICES], value=MODEL_SAM3, label="Model")
+                    gr.Markdown("SAM 3.1 uses the same forward-only tracker as live mode. Compiled startup can take several minutes.")
                     f_frames = gr.Slider(10, 300, value=60, step=10, label="Frames to sample")
                     f_stride = gr.Slider(1, 10, value=3, step=1, label="Stride (every Nth frame)")
                     f_masks = gr.Checkbox(value=True, label="Segmentation masks")
@@ -304,12 +353,15 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
                     f_out = gr.Video(label="Tracked")
                     f_info = gr.Textbox(label="Results", lines=8)
             f_run.click(run_file,
-                        [f_video, f_prompt, f_frames, f_stride, f_masks, f_boxes],
-                        [f_out, f_info])
+                        [f_video, f_prompt, f_frames, f_stride, f_masks, f_boxes, f_model],
+                        [f_out, f_info], concurrency_id="perception-gpu", concurrency_limit=1)
 
         with gr.Tab("Webcam (live)"):
             gr.Markdown(
-                "Live feed with tracking drawn on it. Five backends to compare:\n"
+                "Live feed with tracking drawn on it. Backends to compare:\n"
+                "- **SAM 3.1** — Object Multiplex tracking, up to 16 regions. Normal mode starts faster; "
+                "compiled mode can spend several minutes preparing its first frames. "
+                "Food recognition, occlusion and live speed are still being evaluated.\n"
                 "- **SAM3** — reliable text-prompt grounding, tracks through rotation/angle "
                 "changes because it keeps a memory of the object, not just detection. "
                 "The latest pen run reported one distinct id; that alone does not "
@@ -367,6 +419,7 @@ with gr.Blocks(title="SAM 3 video tracker") as demo:
                 [w_prompt, w_masks, w_boxes, w_camera, w_model, w_config, w_run_state],
                 [w_view, w_info, w_run_state],
                 show_progress="hidden",
+                concurrency_id="perception-gpu", concurrency_limit=1,
             )
             w_stop.click(
                 finalize_run, [w_run_state, w_history],

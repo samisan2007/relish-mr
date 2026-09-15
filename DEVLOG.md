@@ -8,6 +8,69 @@ Detailed perception measurements and tracking experiments live in
 
 ---
 
+## 2026-09-15 - SAM 3.1 in picture, video and webcam testing
+
+Added **SAM 3.1** and **SAM 3.1 (compiled)** to the picture, video-file and live
+webcam model menus. The existing launchers remain `run_sam_img.cmd` (port 7860)
+and `run_sam_vid.cmd` (port 7861). Models now load on selection; choosing 3.1
+releases that UI process's other model caches. The image confidence slider
+controls detection admission and filters results.
+
+The new adapter reuses DARTF's tested Docker transport and cleanup. It processes
+one incoming frame at a time, preserving Object Multiplex tracking state without
+future-frame prefetch. It retains 32 frames of memory plus each bucket's first
+conditioning frame, caps tracking at 16 regions, and starts fresh IDs on every
+run. The limited history may affect longer occlusions. Stop can cancel a webcam
+worker during loading or compilation; failed runs also release their resources.
+File and webcam inference share a concurrency limit. File results separate
+playback FPS, total processing speed, and frame-request timing after the first
+eight frames; the latter still includes any later compilation and Docker transfer.
+
+Added a separate [SAM 3.1 photo/recorded-video launcher](perception/sam31/README.md)
+using Meta's pinned Object Multiplex source and checkpoint. It reuses the Linux
+GPU environment, runs BF16 with PyTorch attention, and saves annotated H.264
+videos, visible IDs, per-frame timings and GPU memory measurements. Eager and
+compiled inference run successfully on the 12 GB RTX 5070. Compilation of the
+initial crowded-scene shapes took about ten minutes; later shapes can compile
+again, including after a tracking-state reset.
+
+On the translated meatball tray, pass 2 measured **3.88 fps eager** and
+**5.65 fps compiled**, with about **5.0 GiB peak PyTorch allocations**. All 12
+region IDs persisted and restarted consistently across two fresh passes.
+Visual inspection found hand/wrist false positives, so 12 is not a count of
+correctly identified food objects. The single-food photo with both `meatball`
+and `ball` prompts returned no detections and correctly failed the synthetic
+smoke check. Their empty-output speeds are not successful tracking results.
+
+These are offline propagation timings: the first eight and final prefetched
+frames are excluded, as are decoding, prompting, overlays, encoding and Windows
+transfer. The detector still prefetches one frame. This configuration does not
+yet meet the 8-10 fps target, and synthetic translation does not test real hand
+occlusion or identity swaps. Real recorded food clips are the next quality test.
+
+Validation: all 30 unit tests pass; Python and PowerShell syntax checks pass.
+Both UIs serve their model menus over HTTP. Normal and compiled UI smokes pass
+picture, 40-frame video, two synthetic webcam runs, mask/video dimensions, ID
+restart and camera/worker cleanup. The normal-mode webcam also detects food
+entering after an initially empty view. Picture output contains 13 regions at threshold 0.5;
+video retains 12 region IDs after confirmation. The physical camera at index 0
+opens and reads 640 x 480 frames. Visual inspection still shows hand/wrist false
+positives; these checks do not establish tracking quality during real occlusion.
+
+The first compiled UI file test measured 2.25 fps for frame requests after the
+first eight frames, including transfer and later compilation; the tracking and
+encoding loop took 155.2 seconds for 40 frames including worker startup. Short
+compiled webcam runs also include compilation and are not steady-speed
+benchmarks. These UI results are distinct from the faster offline measurements
+above. Saved outputs and exact commands are in the ignored `sam31-local/` folder
+and [SAM 3.1 instructions](perception/sam31/README.md). Real food clips remain the
+next speed/quality check before choosing a backend for the 8-10 fps target.
+
+Normal UI inference measured 2.41 fps on the file's requests after the first eight
+frames, and 2.58/2.63 fps on the final four requests of the two synthetic webcam
+runs. Both use Windows/Docker transfer. The food enters on frame 3 and is
+confirmed by frame 5. These short functional checks remain below the target.
+
 ## 2026-09-14 — RTX 3080 FAST handoff
 
 Prepared a separate DARTF FAST build and recorded-video test for the home RTX

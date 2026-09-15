@@ -30,7 +30,8 @@ does the seeing.
   Passthrough, Passthrough Camera Access.
 - **No on-device inference.** The Meta Image Segmentation building block only
   offers Yolo11n-seg — 80 fixed COCO classes, no food nouns. Rejected 2026-09-09.
-- **Perception runs on the PC** in Python (`perception/`), against SAM3 and YOLOE.
+- **Perception runs on the PC** in Python (`perception/`), testing SAM3,
+  SAM 3.1 Object Multiplex, YOLOE and DARTF.
 - **The test UI defaults to SAM3 video, `fp16 autocast, 1008px`.** This is the
   current testing default, not a final production tracking choice.
 - **The widget is decoupled from perception.** `PortionWidget` takes a world
@@ -46,6 +47,11 @@ does the seeing.
   and limitations are in [temp-devlog.md](temp-devlog.md). DARTF is an optional
   experiment with a passing synthetic translation/restart check; live tracking
   quality still needs evaluation.
+- **Food-tracking acceptance target.** Aim for at least 8-10 fps with useful
+  masks and correct identities through motion, crossing and brief hand
+  occlusion. SAM 3.1's initial successful offline test reached 5.65 fps compiled;
+  live and end-to-end timings must be measured separately. False positives and
+  missed food instances remain unresolved, so no final backend is selected.
 - **Quest ↔ PC transport.** Not built. No protocol, no codec, no latency budget.
 - **Where the widget gets anchored.** Screen-space projection of the mask
   centroid, a depth hit, or an MRUK anchor — undecided.
@@ -72,10 +78,26 @@ The widget is a sphere *for now*. The API is the contract; the mesh is not.
 and a webcam UI that switches backends. See [temp-devlog.md](temp-devlog.md) for
 the measurements and the reasoning behind them.
 
-The webcam menu offers SAM3 video, SAM3 image + ByteTrack, YOLOE text, Hybrid
-(SAM3 seed to YOLOE), and experimental DARTF. All adapters return a per-frame
+The webcam menu offers SAM3 video, SAM 3.1 (normal/compiled), SAM3 image + ByteTrack,
+YOLOE text, Hybrid (SAM3 seed to YOLOE), and experimental DARTF. All adapters return a per-frame
 `list[Instance]` containing a pixel mask, box, confidence and optional object ID.
 This does not yet supply Unity's world position or diameter.
+
+SAM 3.1 is also selectable in the picture and video-file modes. It uses the
+pinned official 3.1 checkpoint and source in an optional Linux GPU Docker
+worker, BF16 attention through PyTorch, and up to 16 tracked regions. Models
+load on selection; choosing SAM 3.1 releases the UI process's other model caches.
+Picture mode applies the confidence threshold to detection admission and output.
+Both video modes process incoming frames causally, retain the model's object
+memory, and discard memory older than 32 frames except the first conditioning
+frame per bucket. This differs from the offline demo and may affect long
+occlusions. Each run has fresh IDs, and Stop/failure closes its worker and camera,
+including during compilation. File and webcam GPU work is serialized in the UI.
+Compilation is opt-in and can take minutes on new shapes. Recorded-video
+results distinguish playback FPS, total processing speed and request speed after
+the first eight frames (which can still include later compilation). Webcam
+request timing includes Docker transfer but excludes capture,
+overlays and browser delivery. See [SAM 3.1 setup and tests](perception/sam31/README.md).
 
 DARTF is optional and loads only when selected. Its native SAM3 memory tracker
 and FP16 TensorRT detector run in a GPU Linux Docker container; the Windows

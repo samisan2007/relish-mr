@@ -1,26 +1,41 @@
-"""Interactive SAM 3 tester: upload an image, type a prompt, see the mask.
+"""Interactive SAM3 / SAM 3.1 image tester.
 
     python ui.py     ->  opens http://127.0.0.1:7860
 
-Model loads once at startup, so each prompt after that takes ~0.5s.
+Models load on selection. SAM 3.1 runs in a disposable GPU Docker worker.
 """
 
 import gradio as gr
+import gc
+import torch
 
 from geometry import mask_geometry
 from sam3_runner import Sam3Runner
+from sam31_runner import MODEL_SAM31_COMPILED, SAM31_CHOICES, Sam31Runner
 from viz import draw_instances
 
-print("Loading SAM 3...")
-runner = Sam3Runner()
-print(f"Ready on {runner.device} ({runner.load_seconds:.1f}s)")
+runner = None
 
 
-def run(image, prompt, threshold, show_masks, show_boxes):
+def run(image, prompt, threshold, show_masks, show_boxes, model_choice="SAM3"):
+    global runner
     if image is None or not prompt.strip():
         return None, "Provide an image and a prompt."
 
-    result = runner.segment(image, prompt.strip(), threshold=threshold)
+    try:
+        if model_choice in SAM31_CHOICES:
+            runner = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            active = Sam31Runner(compile_model=model_choice == MODEL_SAM31_COMPILED)
+        else:
+            if runner is None:
+                runner = Sam3Runner()
+            active = runner
+        result = active.segment(image, prompt.strip(), threshold=threshold)
+    except Exception as error:
+        return None, f"{model_choice} failed: {error}"
     if not result.instances:
         return image, f'No "{prompt}" found ({result.inference_ms:.0f}ms). Try lowering the threshold.'
 
@@ -42,10 +57,11 @@ demo = gr.Interface(
         gr.Slider(0.1, 0.95, value=0.5, step=0.05, label="Confidence threshold"),
         gr.Checkbox(value=True, label="Segmentation masks"),
         gr.Checkbox(value=True, label="Bounding boxes"),
+        gr.Dropdown(choices=["SAM3", *SAM31_CHOICES], value="SAM3", label="Model"),
     ],
     outputs=[gr.Image(label="Segmentation"), gr.Textbox(label="Results", lines=10)],
-    title="SAM 3 tester",
-    description="Type any noun phrase. Masks, boxes, centroids and pixel diameters.",
+    title="Relish image tester",
+    description="Choose a model and type a noun phrase. First use loads the model; SAM 3.1 compiled can take several minutes.",
     flagging_mode="never",
 )
 

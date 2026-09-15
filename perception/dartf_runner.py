@@ -9,6 +9,8 @@ import threading
 import time
 import uuid
 
+import numpy as np
+
 from dartf_worker import read_packet, write_packet
 from sam3_runner import Instance
 
@@ -39,29 +41,37 @@ class DartfVideoTracker:
         return DartfSession(self.root, self.assets, text)
 
     def track_frame(self, session, frame):
-        started = time.perf_counter()
-        result = session.request(frame)
-        masks, boxes, scores, ids = (result[k] for k in ("masks", "boxes", "scores", "ids"))
-        if masks.shape != (len(ids), *frame.shape[:2]) or boxes.shape != (len(ids), 4) or scores.shape != (len(ids),):
-            raise RuntimeError("DARTF returned inconsistent masks, boxes, scores or IDs")
-        instances = [
-            Instance(mask, tuple(float(v) for v in box), float(score), int(oid))
-            for mask, box, score, oid in zip(masks, boxes, scores, ids)
-        ]
-        # Include transfer and conversion overhead in the webcam comparison.
-        return instances, (time.perf_counter() - started) * 1000
+        return track_worker_frame(session, frame)
+
+
+def track_worker_frame(session, frame):
+    started = time.perf_counter()
+    result = session.request(frame)
+    masks, boxes, scores, ids = (result[k] for k in ("masks", "boxes", "scores", "ids"))
+    if (ids.ndim != 1 or masks.shape != (len(ids), *frame.shape[:2])
+            or boxes.shape != (len(ids), 4) or scores.shape != (len(ids),)
+            or not np.isfinite(boxes).all() or not np.isfinite(scores).all()):
+        raise RuntimeError("GPU worker returned inconsistent masks, boxes, scores or IDs")
+    instances = [
+        Instance(mask, tuple(float(v) for v in box), float(score), int(oid))
+        for mask, box, score, oid in zip(masks, boxes, scores, ids)
+    ]
+    # Include transfer and conversion overhead in the webcam comparison.
+    return instances, (time.perf_counter() - started) * 1000
 
 
 class DartfSession:
-    def __init__(self, root, assets, prompt):
-        self.name = "relish-dartf-" + uuid.uuid4().hex[:12]
+    label = "DARTF"
+    frame_timeout = 60
+
+    def __init__(self, root, assets, prompt, *, worker_args=None, name_prefix="relish-dartf-", on_started=None):
+        self.name = name_prefix + uuid.uuid4().hex[:12]
         self.log = tempfile.TemporaryFile()
         self.process = None
         self.failed = False
         self.results = queue.Queue()
         self.flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        command = [
-            "docker", "run", "--rm", "-i", "--gpus", "all", "--name", self.name,
+        worker_args = worker_args if worker_args is not None else [
             "--mount", f"type=bind,source={root},target=/dart,readonly",
             "--mount", f"type=bind,source={assets},target=/assets,readonly",
             "--mount", f"type=bind,source={Path(__file__).resolve().parent},target=/app,readonly",
@@ -69,15 +79,18 @@ class DartfSession:
             "/app/dartf_worker.py", "--dart-root", "/dart", "--assets", "/assets",
             "--prompt", prompt,
         ]
+        command = ["docker", "run", "--rm", "-i", "--gpus", "all", "--name", self.name, *worker_args]
         try:
             self.process = subprocess.Popen(
                 command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=self.log, bufsize=0, creationflags=self.flags,
             )
             threading.Thread(target=self._read_results, args=(self.process.stdout,), daemon=True).start()
+            if on_started is not None:
+                on_started(self)
             ready = self.receive(timeout=180)
             if not bool(ready.get("ready", False)):
-                raise RuntimeError("DARTF did not finish initialization")
+                raise RuntimeError(f"{self.label} did not finish initialization")
         except Exception:
             self.reset_inference_session()
             raise
@@ -97,13 +110,15 @@ class DartfSession:
             result = self.results.get(timeout=timeout)
         except queue.Empty:
             self.failed = True
-            raise RuntimeError(f"DARTF did not respond within {timeout} seconds") from None
+            raise RuntimeError(f"{self.label} did not respond within {timeout} seconds") from None
         if result is None or isinstance(result, Exception):
             self.failed = True
-            self.log.seek(0, 2)
-            self.log.seek(max(0, self.log.tell() - 4000))
-            detail = self.log.read().decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"DARTF stopped: {detail or result or 'worker closed its output'}")
+            detail = ""
+            if not self.log.closed:
+                self.log.seek(0, 2)
+                self.log.seek(max(0, self.log.tell() - 4000))
+                detail = self.log.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"{self.label} stopped: {detail or result or 'worker closed its output'}")
         return result
 
     def request(self, frame):
@@ -115,7 +130,7 @@ class DartfSession:
 
         # A hung GPU can stop the worker reading stdin; bound the write as well as the reply.
         threading.Thread(target=send, daemon=True).start()
-        return self.receive(timeout=60)
+        return self.receive(timeout=self.frame_timeout)
 
     def reset_inference_session(self):
         process = self.process

@@ -22,6 +22,7 @@ Test Data/
 *.engine
 perception/*.ts
 perception/dartf-local/
+perception/sam31-local/
 
 # Media / run outputs
 *.mp4

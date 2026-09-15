@@ -49,7 +49,7 @@ Install Python 3.12 first if `py -3.12 --version` cannot find it.
 
 From the `perception/` folder:
 
-1. **Start** — takes ~10s to load the model. From the repo root just run
+1. **Start** — models load on first selection. From the repo root just run
    `.\run_sam_img.cmd` (or double-click it); the equivalent from here is:
 
    ```powershell
@@ -57,8 +57,10 @@ From the `perception/` folder:
    ```
 
 2. **Test** — open <http://127.0.0.1:7860>. Drop in an image, type a noun
-   phrase ("meatball", "pot", "lemon"), hit Submit. Toggle masks/boxes and
-   drag the threshold to taste. Each run takes ~0.5s.
+   phrase ("meatball", "pot", "lemon"), choose **SAM3**, **SAM 3.1** or
+   **SAM 3.1 (compiled)** and hit Submit. Toggle masks/boxes and adjust the
+   threshold. SAM 3.1 requires its [Docker setup](sam31/README.md); compiled
+   first use can take several minutes.
 
 3. **Quit** — press `Ctrl+C` in the terminal. Closing the browser tab does
    not stop it.
@@ -85,12 +87,14 @@ otherwise need several GB. Writes `<video>_<prompt>.mp4` next to the source.
 
 Or use the UI (`run_sam_vid.cmd` from the repo root), which has two tabs:
 
-- **Video file** — the offline path above, better quality.
-- **Webcam (live)** — streaming inference with five selectable backends (see
+- **Video file** — choose SAM3 offline propagation or SAM 3.1's forward-only
+  tracker (normal or compiled). The results separate playback FPS from actual
+  processing speed. Start SAM 3.1 with 60 frames and stride 1.
+- **Webcam (live)** — streaming inference with selectable backends (see
   below), plus a **SAM3 config** dropdown (precision/dispatch/conditioning-frame
   knobs — same options as `bench_realtime.py`, only used when Model = SAM3).
-  Defaults to **SAM3 / fp16 autocast, 1008px**, reusing the model loaded at
-  startup. The video-file tab and Hybrid's SAM3 seed share that fp16 model;
+  Defaults to **SAM3 / fp16 autocast, 1008px**, loading on first selection.
+  The video-file tab and Hybrid's SAM3 seed share that fp16 model;
   fp32 remains selectable for webcam comparisons.
   Stop logs that run's fps/ms/hit-rate into a rolling log of the last 8 runs,
   so you can flip backends/configs and compare by eye against a real moving
@@ -106,6 +110,12 @@ Or use the UI (`run_sam_vid.cmd` from the repo root), which has two tabs:
 First ever run downloads ~3.5 GB of model weights to the Hugging Face cache.
 
 ## Model backends (webcam tab)
+
+**SAM 3.1** and **SAM 3.1 (compiled)** are available in the picture, video-file
+and webcam model menus. See [setup, UI tests and measurements](sam31/README.md).
+The UI uses a causal Docker worker with bounded object memory; the standalone
+offline benchmark has different timing and lookahead. Live frame-request timing
+includes Docker transfer. Stop releases the worker even during compilation.
 
 For the separate optimized DARTF FAST test on an RTX 3080, use the
 [home setup and recorded-video launcher](dartf/RTX3080.md). The webcam DARTF
