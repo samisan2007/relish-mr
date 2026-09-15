@@ -50,6 +50,9 @@ MODEL_YOLOE = "YOLOE (text prompt)"
 MODEL_HYBRID = "Hybrid (SAM3 seed -> YOLOE track)"
 MODEL_DARTF = "DARTF (native SAM3, FP16 TensorRT)"
 MODEL_CHOICES = [MODEL_SAM3, *SAM31_CHOICES, MODEL_SAM3_IMG, MODEL_YOLOE, MODEL_HYBRID, MODEL_DARTF]
+# Backends whose model runs in a Docker worker: their per-frame timing includes transfer,
+# so the run summary reports request speed separately from total processing.
+WORKER_CHOICES = [*SAM31_CHOICES, MODEL_DARTF]
 
 # Webcam tab: one extra SAM3 config may be cached alongside `tracker` so switching between
 # the baseline and one alternate is instant; switching to a different alternate reloads.
@@ -87,12 +90,19 @@ def get_active_tracker(model_choice: str, config_name: str):
     status line and run log so entries stay distinguishable across backends."""
     global tracker, _yoloe_tracker, _hybrid_tracker, _sam3_image_tracker
 
-    if model_choice in SAM31_CHOICES:
+    if model_choice in SAM31_CHOICES or model_choice == MODEL_DARTF:
+        # Both run their model inside a GPU Docker worker, so every Windows-side copy has
+        # to leave the card first — otherwise the two compete for the same 12GB and the
+        # driver spills to system RAM rather than failing.
         tracker = _yoloe_tracker = _hybrid_tracker = _sam3_image_tracker = None
         _bench_cache.clear()
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if model_choice == MODEL_DARTF:
+            from dartf_runner import DartfVideoTracker
+
+            return DartfVideoTracker(), MODEL_DARTF
         return Sam31Runner(compile_model=model_choice == MODEL_SAM31_COMPILED), model_choice
 
     if model_choice == MODEL_SAM3_IMG:
@@ -113,11 +123,6 @@ def get_active_tracker(model_choice: str, config_name: str):
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-    if model_choice == MODEL_DARTF:
-        from dartf_runner import DartfVideoTracker
-
-        return DartfVideoTracker(), MODEL_DARTF
 
     if model_choice == MODEL_YOLOE:
         if _yoloe_tracker is None:
@@ -179,7 +184,7 @@ def run_file(video_path, prompt, max_frames, stride, show_masks, show_boxes,
         f"[{label}] {len(frames)} frames; playback {out_fps:.1f} fps",
         f"Total processing: {elapsed:.1f}s ({len(frames) / elapsed:.2f} fps, including startup and encoding)",
         *([f"Frame requests after first 8: {1000 / np.mean(times[8:]):.2f} fps (includes Docker transfer and any later compilation)"]
-          if model_choice in SAM31_CHOICES and len(times) > 8 else []),
+          if model_choice in WORKER_CHOICES and len(times) > 8 else []),
         f"Distinct track IDs: {sorted(seen_ids)}",
         f"Objects per frame: min {min(counts)}, max {max(counts)}",
         "",
@@ -342,9 +347,11 @@ with gr.Blocks(title="Relish video tracker") as demo:
                 with gr.Column():
                     f_video = gr.Video(label="Video")
                     f_prompt = gr.Textbox(label="Prompt", placeholder="mug")
-                    f_model = gr.Dropdown(choices=[MODEL_SAM3, *SAM31_CHOICES], value=MODEL_SAM3, label="Model")
-                    gr.Markdown("SAM 3.1 uses the same forward-only tracker as live mode. Compiled startup can take several minutes.")
-                    f_frames = gr.Slider(10, 300, value=60, step=10, label="Frames to sample")
+                    f_model = gr.Dropdown(choices=[MODEL_SAM3, *SAM31_CHOICES, MODEL_DARTF], value=MODEL_SAM3, label="Model")
+                    gr.Markdown("SAM 3.1 and DARTF use the same forward-only tracker as live mode, so a "
+                                "file replay is comparable to their webcam runs. Compiled startup can take "
+                                "several minutes. Use stride 1 to match a consecutive-frame benchmark.")
+                    f_frames = gr.Slider(10, 700, value=60, step=10, label="Frames to sample")
                     f_stride = gr.Slider(1, 10, value=3, step=1, label="Stride (every Nth frame)")
                     f_masks = gr.Checkbox(value=True, label="Segmentation masks")
                     f_boxes = gr.Checkbox(value=True, label="Bounding boxes")

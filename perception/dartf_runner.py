@@ -11,11 +11,29 @@ import uuid
 
 import numpy as np
 
+from PIL import Image
+
 from dartf_worker import read_packet, write_packet
 from sam3_runner import Instance
+from video_runner import FrameResult
 
 
-class DartfVideoTracker:
+class WorkerTracker:
+    """Adapts a start_stream/track_frame worker into the frame generator the file
+    tab and track_video expect. Both Docker backends feed frames one at a time and
+    differ only in which session they open, so the loop is shared."""
+
+    def track(self, frames, text):
+        session = self.start_stream(text)
+        try:
+            for idx, frame in enumerate(frames):
+                instances, ms = self.track_frame(session, frame)
+                yield FrameResult(idx, Image.fromarray(frame), instances, ms)
+        finally:
+            session.reset_inference_session()
+
+
+class DartfVideoTracker(WorkerTracker):
     def __init__(self):
         self.root = Path(os.environ.get(
             "DART_ROOT", Path(__file__).resolve().parents[2] / "DART"

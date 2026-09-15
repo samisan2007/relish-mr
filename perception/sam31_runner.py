@@ -4,10 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
-from dartf_runner import DartfSession, track_worker_frame
+from dartf_runner import DartfSession, WorkerTracker, track_worker_frame
 from sam3_runner import SegmentResult
-from video_runner import FrameResult
-from PIL import Image
 
 MODEL_SAM31 = "SAM 3.1"
 MODEL_SAM31_COMPILED = "SAM 3.1 (compiled)"
@@ -41,7 +39,7 @@ class Sam31Session(DartfSession):
         super().__init__(local, local, prompt, worker_args=args, name_prefix="relish-sam31-ui-", on_started=on_started)
 
 
-class Sam31Runner:
+class Sam31Runner(WorkerTracker):
     def __init__(self, compile_model=False):
         self.compile_model = compile_model
 
@@ -56,14 +54,5 @@ class Sam31Runner:
         try:
             instances, ms = self.track_frame(session, np.asarray(image.convert("RGB")))
             return SegmentResult([i for i in instances if i.score >= threshold], ms)
-        finally:
-            session.reset_inference_session()
-
-    def track(self, frames, text):
-        session = self.start_stream(text)
-        try:
-            for idx, frame in enumerate(frames):
-                instances, ms = self.track_frame(session, frame)
-                yield FrameResult(idx, Image.fromarray(frame), instances, ms)
         finally:
             session.reset_inference_session()
