@@ -350,7 +350,7 @@ with gr.Blocks(title="Relish video tracker") as demo:
                     f_model = gr.Dropdown(choices=[MODEL_SAM3, *SAM31_CHOICES, MODEL_DARTF], value=MODEL_SAM3, label="Model")
                     gr.Markdown("Stride 1 for a benchmark comparable to a live run. "
                                 "Compiled startup takes minutes.")
-                    f_frames = gr.Slider(10, 700, value=60, step=10, label="Frames to sample")
+                    f_frames = gr.Slider(10, 1000, value=60, step=10, label="Frames to sample")
                     f_stride = gr.Slider(1, 10, value=3, step=1, label="Stride (every Nth frame)")
                     f_masks = gr.Checkbox(value=True, label="Segmentation masks")
                     f_boxes = gr.Checkbox(value=True, label="Bounding boxes")
