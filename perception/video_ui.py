@@ -49,10 +49,11 @@ MODEL_SAM3_IMG = "SAM3 image + ByteTrack"
 MODEL_YOLOE = "YOLOE (text prompt)"
 MODEL_HYBRID = "Hybrid (SAM3 seed -> YOLOE track)"
 MODEL_DARTF = "DARTF (native SAM3, FP16 TensorRT)"
-MODEL_CHOICES = [MODEL_SAM3, *SAM31_CHOICES, MODEL_SAM3_IMG, MODEL_YOLOE, MODEL_HYBRID, MODEL_DARTF]
+MODEL_DARTF_FAST = "DARTF FAST (W8A8 TensorRT)"
+MODEL_CHOICES = [MODEL_SAM3, *SAM31_CHOICES, MODEL_SAM3_IMG, MODEL_YOLOE, MODEL_HYBRID, MODEL_DARTF, MODEL_DARTF_FAST]
 # Backends whose model runs in a Docker worker: their per-frame timing includes transfer,
 # so the run summary reports request speed separately from total processing.
-WORKER_CHOICES = [*SAM31_CHOICES, MODEL_DARTF]
+WORKER_CHOICES = [*SAM31_CHOICES, MODEL_DARTF, MODEL_DARTF_FAST]
 
 # Webcam tab: one extra SAM3 config may be cached alongside `tracker` so switching between
 # the baseline and one alternate is instant; switching to a different alternate reloads.
@@ -90,7 +91,7 @@ def get_active_tracker(model_choice: str, config_name: str):
     status line and run log so entries stay distinguishable across backends."""
     global tracker, _yoloe_tracker, _hybrid_tracker, _sam3_image_tracker
 
-    if model_choice in SAM31_CHOICES or model_choice == MODEL_DARTF:
+    if model_choice in SAM31_CHOICES or model_choice in (MODEL_DARTF, MODEL_DARTF_FAST):
         # Both run their model inside a GPU Docker worker, so every Windows-side copy has
         # to leave the card first — otherwise the two compete for the same 12GB and the
         # driver spills to system RAM rather than failing.
@@ -103,6 +104,10 @@ def get_active_tracker(model_choice: str, config_name: str):
             from dartf_runner import DartfVideoTracker
 
             return DartfVideoTracker(), MODEL_DARTF
+        if model_choice == MODEL_DARTF_FAST:
+            from dartf_runner import FastVideoTracker
+
+            return FastVideoTracker(), MODEL_DARTF_FAST
         return Sam31Runner(compile_model=model_choice == MODEL_SAM31_COMPILED), model_choice
 
     if model_choice == MODEL_SAM3_IMG:
@@ -246,7 +251,7 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
     try:
         yield None, f"Starting {label}; compiled first frames can take several minutes. Stop cancels the run.", {}
         try:
-            if isinstance(cam_tracker, Sam31Runner):
+            if isinstance(cam_tracker, Sam31Runner) or model_choice in (MODEL_DARTF, MODEL_DARTF_FAST):
                 session = cam_tracker.start_stream(prompt.strip(), on_started=on_started)
             else:
                 session = cam_tracker.start_stream(prompt.strip())
@@ -375,6 +380,7 @@ with gr.Blocks(title="Relish video tracker") as demo:
 | YOLOE | Fast text detection; weak on specific food nouns. |
 | Hybrid | SAM3 seeds once, then YOLOE tracks. |
 | DARTF | FP16 TensorRT + native SAM3 memory, via Docker. Needs locally built engines. |
+| DARTF FAST | W8A8 TensorRT + lightweight tracker, via Docker. Needs the RTX 3080 FAST build. |
 
 Streaming keeps duplicate tracks the file tab would prune, so expect more false
 positives here. Measurements live in `temp-devlog.md`.

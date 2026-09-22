@@ -13,9 +13,10 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
+import cv2
 import numpy as np
 
-from dartf_runner import DartfSession, DartfVideoTracker
+from dartf_runner import DartfSession, DartfVideoTracker, FastSession
 from dartf_worker import MAX_PACKET_BYTES, read_packet, write_packet
 
 
@@ -79,6 +80,21 @@ class SessionTests(unittest.TestCase):
         remove = patch('dartf_runner.subprocess.run')
         self.remove = remove.start()
         self.addCleanup(remove.stop)
+
+    def test_fast_transport_preserves_rgb_pixels_and_boolean_masks(self):
+        session = FastSession.__new__(FastSession)
+        session.process = Mock(stdin=io.BytesIO())
+        frame = np.full((480, 640, 3), [255, 20, 10], dtype=np.uint8)
+        session._send_frame(frame)
+        session.process.stdin.seek(0)
+        packet = read_packet(session.process.stdin)
+        decoded = cv2.cvtColor(cv2.imdecode(packet['png'], cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+        np.testing.assert_array_equal(decoded, frame)
+        masks = np.zeros((1, 480, 640), bool)
+        masks[0, 40:90, 51:173] = True
+        with patch.object(DartfSession, 'request', return_value={
+                'packed_masks': np.packbits(masks, axis=-1), 'ids': np.array([3])}):
+            np.testing.assert_array_equal(session.request(frame)['masks'], masks)
 
     def test_rgb_frame_and_two_instances_roundtrip(self):
         frame = np.full((8, 12, 3), [255, 20, 10], dtype=np.uint8)

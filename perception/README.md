@@ -117,9 +117,14 @@ The UI uses a causal Docker worker with bounded object memory; the standalone
 offline benchmark has different timing and lookahead. Live frame-request timing
 includes Docker transfer. Stop releases the worker even during compilation.
 
-For the separate optimized DARTF FAST test on an RTX 3080, use the
-[home setup and recorded-video launcher](dartf/RTX3080.md). The webcam DARTF
-entry below remains the native FP16 mode.
+**DARTF FAST (W8A8 TensorRT)** is available in the Webcam tab on an RTX 3080
+after the [FAST build setup](dartf/RTX3080.md). It uses the optimized detector,
+segmentation head and lightweight tracker. The other DARTF entry is native FP16.
+The live adapter sends lossless PNG frames and packed masks through Docker.
+It processes one frame per request; the recorded benchmark additionally overlaps
+frames. On the 3080, a repeated single-dog input improved from 3.0 to 6.35 frame
+requests/sec after fixing the transfer overhead (2026-09-22). This is a wiring
+and speed check, not a watch-tracking or motion-quality measurement.
 
 **DARTF (native SAM3, FP16 TensorRT)** is an experimental Docker backend with
 locally built engines. Real inference and a synthetic translation/restart smoke

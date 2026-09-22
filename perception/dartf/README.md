@@ -61,8 +61,9 @@ Use `--stage backbone|text|heads|tracker|plans` to rerun a particular stage whil
 diagnosing a failure. Tracker plans batch two objects at a time for the 12 GB GPU;
 additional objects are processed in chunks, not discarded.
 
-The source, checkpoint, image and all engines are already present on this
-machine; restart the UI to select DARTF. These large local artifacts are not
+The source, checkpoint, image and all engines were prepared on the RTX 5070
+test machine. A new PC needs its own setup and GPU-specific engine builds;
+restart the UI after setup to select DARTF. These large local artifacts are not
 committed. To continue an interrupted build elsewhere, rerun the `docker run`
 command above after setup. A stage
 marker is written only after that export succeeds, and engine files are renamed

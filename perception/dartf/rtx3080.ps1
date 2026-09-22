@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Image', 'Login', 'Check', 'Download', 'Build', 'Test')]
+    [ValidateSet('Image', 'Login', 'Check', 'Download', 'Build', 'Test', 'Live')]
     [string]$Action = 'Check',
     [string]$Video,
     [string]$Prompt = 'pen',
@@ -34,12 +34,14 @@ if ($Action -eq 'Image') {
     exit
 }
 
+if ($Action -eq 'Test' -or $Action -eq 'Live') {
+    if ([string]::IsNullOrWhiteSpace($Prompt) -or $Prompt.Contains(',')) {
+        throw 'Use a single non-empty prompt, such as pen.'
+    }
+}
 if ($Action -eq 'Test') {
     if (-not $Video -or -not (Test-Path -LiteralPath $Video -PathType Leaf)) {
         throw 'Test requires -Video pointing to a recorded video file.'
-    }
-    if ([string]::IsNullOrWhiteSpace($Prompt) -or $Prompt.Contains(',')) {
-        throw 'Use a single non-empty prompt, such as pen.'
     }
     $Video = (Resolve-Path -LiteralPath $Video).Path
 }
@@ -54,6 +56,7 @@ if ($Action -eq 'Login') {
     exit
 }
 if ($Action -ne 'Download') { $dockerArgs += @('--gpus', 'all') }
+if ($Action -eq 'Live') { $dockerArgs += '-i' }
 $dockerArgs += @('--mount', "type=bind,source=$cacheDir,target=/hf",
     '--mount', "type=bind,source=$assetsDir,target=/assets",
     '--mount', "type=bind,source=$perceptionRoot,target=/app,readonly")
@@ -63,11 +66,18 @@ if ($Action -eq 'Test') {
     $dockerArgs += @('--mount', "type=bind,source=$inputDir,target=/input,readonly")
 }
 $stages = @{ Check = 'check'; Download = 'download'; Build = 'all'; Test = 'benchmark' }
-$dockerArgs += @('--entrypoint', 'python', $imageName, '/app/dartf/fast.py',
-    '--stage', $stages[$Action], '--threads', "$Threads")
+if ($Action -eq 'Live') {
+    $dockerArgs += @('--entrypoint', 'python', $imageName, '/app/dartf/live.py')
+} else {
+    $dockerArgs += @('--entrypoint', 'python', $imageName, '/app/dartf/fast.py',
+        '--stage', $stages[$Action], '--threads', "$Threads")
+}
 if ($Action -eq 'Test') {
     $dockerArgs += @('--video', "/input/$inputName", '--prompt', $Prompt, '--frames', "$Frames")
     if ($Render) { $dockerArgs += '--render' }
+}
+if ($Action -eq 'Live') {
+    $dockerArgs += @('--prompt', $Prompt, '--frames', "$Frames")
 }
 Invoke-Docker $dockerArgs
 if (-not $DryRun) { Write-Host "Local files: $WorkDir" }

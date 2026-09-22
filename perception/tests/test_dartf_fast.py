@@ -1,5 +1,6 @@
 """Host-only checks for the RTX 3080 handoff: no weights, GPU or Docker required."""
 
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -12,9 +13,27 @@ from unittest.mock import patch
 FAST_DIR = Path(__file__).resolve().parents[1] / 'dartf'
 sys.path.insert(0, str(FAST_DIR))
 import fast
+import live
 
 
 class FastSetupTests(unittest.TestCase):
+    def test_ui_reader_preserves_colors_and_handles_end_of_stream(self):
+        import cv2
+        import numpy as np
+        from dartf_worker import write_packet
+
+        rgb = np.full((480, 640, 3), [255, 20, 10], np.uint8)
+        rgb[100:200, 100:200] = [0, 50, 255]
+        ok, png = cv2.imencode('.png', cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        self.assertTrue(ok)
+        stream = io.BytesIO()
+        write_packet(stream, png=png)
+        stream.seek(0)
+        reader = live.UiReader(stream)
+        actual = np.frombuffer(reader.read(1008 * 1008 * 3), np.uint8).reshape(1008, 1008, 3)
+        np.testing.assert_array_equal(actual, cv2.resize(rgb, (1008, 1008)))
+        self.assertEqual(reader.read(1008 * 1008 * 3), b'')
+
     def test_published_scales_survive_schema_conversion(self):
         scales = {f'block{b}.{fam}': (b + 1) / 1000
                   for b in range(32) for fam in ('qkv', 'proj', 'fc1', 'fc2')}

@@ -1,5 +1,29 @@
 # Real-time food tracking — findings, progress, options
 
+## RTX 3080 webcam comparison and FAST transfer fix — 2026-09-22
+
+User-reported watch test: FAST about 3 fps, SAM3 about 2.9 fps, and the
+SAM3-seeded YOLOE hybrid about 24 fps. SAM 3.1 (both modes) and native DARTF
+FP16 could not start. This PC has neither `perception/sam31-local/` nor the
+separate native DART checkout/engines; those setups were local to the 5070 PC.
+
+Reproduced FAST's slowdown using 24 requests of the same first frame from the
+local `smoke-dog.mp4`, prompt `dog`, one confirmed ID; averages exclude eight
+startup frames. Original UI requests took 334 ms, of which model and tracking
+took 108 ms. The adapter sent a raw 1008x1008 RGB frame and full boolean masks
+through Docker's Windows pipes on every request.
+
+Lossless PNG input at the camera resolution, resize inside the worker, and
+bit-packed output masks reduce requests to 159 ms (6.3 fps); model time remains
+107 ms. The actual Gradio webcam generator measured 6.35 fps on the same input
+and produced an overlay with ID 1. All 32 unit tests pass. This check does not
+establish watch accuracy or identity continuity through motion/occlusion.
+
+The UI processes one frame per request, while the recorded FAST benchmark uses
+overlapping frames. The hybrid runs SAM3 until it gets a seed, then uses YOLOE
+for the remaining frames; its 24 fps is the YOLOE phase. UI timings exclude
+camera capture, drawing and browser delivery.
+
 ## RTX 3080 FAST preparation — 2026-09-14
 
 The 1.8 fps native FP16 smoke result does not measure upstream's FAST recipe.

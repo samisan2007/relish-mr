@@ -8,6 +8,23 @@ Detailed perception measurements and tracking experiments live in
 
 ---
 
+## 2026-09-22 — DARTF FAST webcam transport
+
+A watch test on this PC put FAST at about 3 fps, SAM3 at about 2.9 fps and the
+SAM3-seeded YOLOE hybrid at about 24 fps, the last being its YOLOE phase rather
+than a like-for-like tracker result.
+
+FAST's slowdown turned out to be transport, not the model. The adapter sent a
+raw 1008x1008 RGB frame and full boolean masks through Docker's Windows pipes on
+every request: 334 ms per request, of which model and tracking were only 108 ms.
+Sending lossless PNG at the camera resolution, resizing inside the worker and
+bit-packing the output masks cut requests to 159 ms (6.3 fps) with model time
+unchanged at 107 ms. The Gradio webcam generator measured 6.35 fps on the same
+input and produced an overlay with ID 1.
+
+This measures transport, not watch accuracy or identity continuity through
+motion and occlusion, which are still unevaluated.
+
 ## 2026-09-15 - SAM 3.1 in picture, video and webcam testing
 
 Added **SAM 3.1** and **SAM 3.1 (compiled)** to the picture, video-file and live
