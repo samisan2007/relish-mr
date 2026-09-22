@@ -49,9 +49,11 @@ does the seeing.
   quality still needs evaluation.
 - **Food-tracking acceptance target.** Aim for at least 8-10 fps with useful
   masks and correct identities through motion, crossing and brief hand
-  occlusion. SAM 3.1's initial successful offline test reached 5.65 fps compiled;
-  live and end-to-end timings must be measured separately. False positives and
-  missed food instances remain unresolved, so no final backend is selected.
+  occlusion. SAM 3.1's initial successful offline test reached 5.65 fps compiled
+  on the RTX 5070; on the home RTX 3080 the same worker path measured 2.68 fps
+  eager and 3.42 fps compiled. Live and end-to-end timings must be measured
+  separately. False positives and missed food instances remain unresolved, so no
+  final backend is selected.
 - **Quest ↔ PC transport.** Not built. No protocol, no codec, no latency budget.
 - **Where the widget gets anchored.** Screen-space projection of the mask
   centroid, a depth hit, or an MRUK anchor — undecided.
@@ -106,9 +108,10 @@ the GPU/runtime. Full memory is retained, with additional objects processed in
 batches of two. This experiment does not implement the upstream W8A8 recipe.
 Missing assets or startup failures must produce a UI error and release the
 camera. Real inference, mask transfer and restart pass the synthetic smoke
-check. See [setup and validation](perception/dartf/README.md); identity continuity
-through real motion and occlusion still needs evaluation before recommending
-this backend.
+check on both the RTX 5070 and the home RTX 3080, which builds its own SM86
+engines. See [setup and validation](perception/dartf/README.md); identity
+continuity through real motion and occlusion still needs evaluation before
+recommending this backend.
 
 A separate [RTX 3080 FAST experiment](perception/dartf/RTX3080.md) prepares the
 W8A8 detector, fused mask head, lightweight tracker and frame pipeline. Its

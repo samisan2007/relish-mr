@@ -8,6 +8,35 @@ Detailed perception measurements and tracking experiments live in
 
 ---
 
+## 2026-09-22 — SAM 3.1 and native DARTF FP16 on the RTX 3080
+
+Installed both backends on the home RTX 3080 and ran their startup checks; an
+earlier session on this PC could start neither, because both setups were local
+to the 5070. DART is pinned to `16fada39` with SM86 engines built locally into
+`DART/dartf/assets`; SAM 3.1 uses source `660a5e9e` and checkpoint `daa63191`.
+Engines, weights and compile caches are GPU- and host-specific and stay
+uncommitted, so each new PC still needs its own setup run.
+
+Native DARTF FP16 holds four IDs through a translated test frame and restarts
+cleanly, at 449 ms per frame including Docker transfer. SAM 3.1 tracks the same
+four objects at 2.11 fps eager, with masks confirmed by eye rather than by hit
+counts alone.
+
+Fixed SAM 3.1 compiled mode, which failed here with an Inductor
+`FileNotFoundError` on a file that was present on disk. The Inductor and Triton
+caches sat on a Windows bind mount, which does not make one compile worker's
+writes visible to another in time. Both launchers now use the Docker volume
+`relish-sam31-compile-cache`. Compiled mode then reaches 3.42 fps against 2.68
+eager on the same path, after roughly 2.8 minutes of one-time compilation that
+lands on the second frame, because the first frame runs eagerly. The apparent
+"loads, shows one frame, freezes" symptom was that compile, not a hang.
+
+Both figures are below the 8-10 fps acceptance target, and both were measured on
+a stock photo translated across a synthetic frame. This PC has no `Media/`
+folder, so `tests/smoke_sam31_ui.py` cannot run as written and the 5070's tray
+measurements have no like-for-like counterpart here yet. Detailed timings are in
+[temp-devlog.md](temp-devlog.md).
+
 ## 2026-09-22 — DARTF FAST webcam transport
 
 A watch test on this PC put FAST at about 3 fps, SAM3 at about 2.9 fps and the

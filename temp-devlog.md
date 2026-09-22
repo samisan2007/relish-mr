@@ -1,5 +1,60 @@
 # Real-time food tracking — findings, progress, options
 
+## RTX 3080 setup: SAM 3.1 and native DARTF FP16 — 2026-09-22
+
+Both backends the entry below could not start are now installed on this PC.
+
+**Native DARTF FP16.** DART pinned to `16fada39`, SM86 engines built locally:
+backbone 873 MB (97 layers pinned FP32 by the norm-only DART mixed-precision
+recipe), grounding 46 MB, mask head, and three tracker engines. TensorRT warned
+that FP16 layernorm after self-attention may overflow and forced those Reduce/Pow
+layers to FP32. Export ran into a Docker volume rather than the Windows bind
+mount, which was writing the multi-gigabyte ONNX at a crawl; the 27 resulting
+files were then copied to `DART/dartf/assets` and verified by checksum.
+
+`tests/smoke_dartf.py` on a substitute photo (ultralytics `bus.jpg`, prompt
+`person`): 4 instances, IDs 1-4 held across 12 translated frames, and a restart
+reset IDs. Settled tail 449 ms, 2.2 fps including transfer. The 5070's
+comparable figure was 549 ms with 13 objects, so the two do not compare.
+
+**SAM 3.1.** Source `660a5e9e`, checkpoint `daa63191` (3.5 GB, sha256 matches its
+HF blob id). Offline benchmark, 24 frames, eager BF16, prompt `person`: pass 1
+2.04 fps, pass 2 2.11 fps, 4.92 GiB peak allocated, IDs 0-3 on every frame of
+both passes. The annotated frame shows four correctly segmented people at
+0.96/0.96/0.96/0.82.
+
+**Compiled mode was failing, and the compile was not the cause.** `torch.compile`
+died with `FileNotFoundError` on `/local/inductor/<hash>.py`, a file present on
+disk with a timestamp matching the moment it was reported missing. `/local` is a
+bind mount to `perception/sam31-local` on S:. Inductor's compile workers write
+generated kernels and reopen them by path, and the Windows mount does not make
+those writes visible to the other process in time; `mode="max-autotune"` emits
+thousands of kernels (9,264 cache files in five minutes), so the race fires
+reliably. Both launchers now keep the caches in the Docker volume
+`relish-sam31-compile-cache`.
+
+**What "one frame then frozen" actually was.** In `sam31/worker.py` frame 0 takes
+the `state is None` branch, which compiles only when `image_only` is set, so
+video and webcam run frame 0 eagerly and return quickly. Frame 1 takes the other
+branch and calls `_compile_model()`, compiling nine components at
+`max-autotune`. Measured on a warm cache: frame 0 4.4 s, frame 1 141.0 s,
+frame 2 29.2 s, then 0.27-0.34 s. About 2.8 minutes of compilation, inside the
+1200 s per-frame cap, so that cap did not need raising.
+
+Frame 1 returns zero objects. An eager control over the same worker path does the
+same, with IDs returning at frame 2 in both, so this is the live path's normal
+second-frame behaviour, not a compile defect.
+
+Steady frames 3-5 on the same worker path: eager 373 ms (2.68 fps), compiled
+293 ms (3.42 fps), about 1.28x. The 2.11 fps eager figure above came from
+`benchmark.py`'s `propagate_in_video` path and is not comparable to these two.
+
+These are 4 objects on a 640x480 synthetic translation of a stock photo, not food
+footage, and they do not establish identity continuity through real motion or
+occlusion. This PC has no `Media/` folder, so `tests/smoke_sam31_ui.py`, which
+hardcodes `Media/meatballs_img.jpg`, could not run and the 5070's tray
+measurements have no like-for-like counterpart here yet.
+
 ## RTX 3080 webcam comparison and FAST transfer fix — 2026-09-22
 
 User-reported watch test: FAST about 3 fps, SAM3 about 2.9 fps, and the

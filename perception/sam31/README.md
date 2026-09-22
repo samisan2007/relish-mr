@@ -18,12 +18,21 @@ Face login from its default location. If access is denied, accept the terms at
 [facebook/sam3.1](https://huggingface.co/facebook/sam3.1), log in using the existing
 perception environment's `hf auth login`, then repeat Setup.
 
-Source, model cache, compiler cache and results are ignored under
-`perception/sam31-local/`. Setup does not install packages into the Windows venv.
+Source, model cache and results are ignored under `perception/sam31-local/`.
+Setup does not install packages into the Windows venv.
+
+The Inductor/Triton compile caches live in the Docker volume
+`relish-sam31-compile-cache`, not under `sam31-local/`. Inductor's compile workers
+write generated kernels and reopen them by path, and a Windows bind mount does not
+make those writes visible to the other processes in time; compiled runs then fail
+with `FileNotFoundError` on a file that is present on disk. Removing that volume
+discards the cached kernels and the next compiled run pays the full build again.
 
 ## Test in the UI
 
-Setup is already complete on this RTX 5070. Keep Docker Desktop running Linux
+Setup was completed on the RTX 5070 test machine. The local source, checkpoint
+and Docker image are not included in a clone; run Setup on each new PC.
+Keep Docker Desktop running Linux
 containers, and run one GPU test at a time. From the repository root:
 
 | Mode | Launch | Test |
@@ -34,7 +43,8 @@ containers, and run one GPU test at a time. From the repository root:
 
 Each mode also offers **SAM 3.1 (compiled)**. Start with normal mode for quick
 checks. Compiled first frames can take several minutes; webcam Stop can cancel
-model loading or compilation. A fresh worker loads for every picture/file/Start,
+model loading or compilation. Frame 0 runs eagerly and returns quickly, so the
+compile wait lands on the second frame, not the first. A fresh worker loads for every picture/file/Start,
 so model startup is paid again; downloaded weights and compiled kernels are
 cached. SAM3 remains the default and loads only when selected. Selecting SAM 3.1
 releases other model caches in that UI process to leave room on the 12 GB GPU.

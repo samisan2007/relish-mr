@@ -16,6 +16,7 @@ $sourceRoot = Join-Path $localRoot 'source'
 $sourceRevision = '660a5e9e1b8b4c02c0ad97229b88a09a6e4ff5b7'
 $checkpointRevision = 'daa63191845a41281374e725f4c9e51c7a824460'
 $imageName = 'relish-sam31:local'
+$compileCacheVolume = 'relish-sam31-compile-cache'
 
 if ($Action -eq 'Setup') {
     New-Item -ItemType Directory -Force -Path $localRoot | Out-Null
@@ -40,9 +41,12 @@ $dockerArgs = @('run', '--rm', '--name', ('relish-sam31-' + [Guid]::NewGuid().To
     '--mount', "type=bind,source=$localRoot,target=/local",
     '--mount', "type=bind,source=$sourceRoot,target=/sam31,readonly",
     '--mount', "type=bind,source=$perceptionRoot,target=/app,readonly",
+    # Compile caches stay on a Docker volume; a Windows bind mount does not make
+    # Inductor's generated kernels visible to its compile workers in time.
+    '--mount', "type=volume,source=$compileCacheVolume,target=/compile-cache",
     '--env', 'HF_HOME=/local/hf', '--env', 'PYTHONPATH=/sam31',
     '--env', 'PYTHONDONTWRITEBYTECODE=1', '--env', 'OMP_NUM_THREADS=8',
-    '--env', 'TORCHINDUCTOR_CACHE_DIR=/local/inductor', '--env', 'TRITON_CACHE_DIR=/local/triton')
+    '--env', 'TORCHINDUCTOR_CACHE_DIR=/compile-cache/inductor', '--env', 'TRITON_CACHE_DIR=/compile-cache/triton')
 if ($Action -eq 'Setup') {
     $tokenPath = Join-Path $env:USERPROFILE '.cache\huggingface\token'
     if (Test-Path -LiteralPath $tokenPath) {
