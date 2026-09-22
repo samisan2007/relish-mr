@@ -8,6 +8,49 @@ Detailed perception measurements and tracking experiments live in
 
 ---
 
+## 2026-09-22 — SAM 3.1 + YOLOE hybrid, re-grounding, and a drift guard
+
+Added **Hybrid (SAM 3.1 seed -> YOLOE track)** to the webcam menu. The hybrid's
+seeder was already duck-typed on `start_stream`/`track_frame`, which `Sam31Runner`
+already satisfies, so the model work was small; the work was lifecycle. The
+session is now a `dict` subclass carrying `reset_inference_session()`, so the two
+cleanup paths that already existed stop no-opping and actually close the SAM 3.1
+container — without it every Stop stranded one. `start_stream` forwards
+`on_started`, so Stop can cancel a container mid-boot as it can for the plain
+3.1 and DARTF backends.
+
+The seeder now stays open for the whole stream and re-grounds, instead of seeding
+once and freezing its exemplars. Two triggers: a selectable frame interval (a new
+webcam slider) and, always, YOLOE returning nothing. On the 3080 at 640x480 a
+quiet YOLOE frame is ~35ms against ~750ms for a SAM 3.1 re-ground, giving ~28 fps
+at interval 0, ~21 at 60 and 9.0 measured at 10. Keeping the worker alive is what
+makes this affordable — a re-ground is one inference, not a ~40s container boot.
+
+The interval defaults to off, because re-grounding **restarts the track IDs**:
+`YOLOE.predict` drops its predictor after `set_classes`, so installing fresh
+exemplars rebuilds the tracker. Measured ids `[1] -> [2] -> [3] -> [4]`, one bump
+per re-ground, and 3 distinct IDs against 1 on the same 40-frame clip at intervals
+10 and 30. Since the run log reports distinct-ID counts as a quality number, a
+short interval quietly inflates it.
+
+Chased a live report of the hybrid locking onto a whole t-shirt while prompted for
+a pen or a watch. SAM 3.1 is not the culprit: on that frame it returns nothing for
+either noun, and where it is confident (knives) it returns 0.84-0.90, so it emits
+clean exemplars or none. YOLOE seeded on knives and shown a person also returns
+nothing, so drift is not automatic — it needs a thin exemplar whose embedding
+generalizes badly. The real defect was structural: YOLOE matches the exemplar, not
+the words, nothing downstream could tell a box was wrong, and the only corrective
+trigger was *zero* detections, so a confidently-wrong box at 0.29 (over the 0.15
+floor) was an absorbing state. Boxes more than `drift_scale` (default 8x, ~2.8x
+linear) the biggest seeded box in area are now rejected; the frame then reads as
+lost and re-grounds, so drift corrects itself. Area alone will not catch a drift
+onto something similarly sized — that still needs the interval.
+
+Unverified: none of this has been through a live webcam run here. The numbers come
+from real SAM 3.1 and YOLOE inference on stills, and the drift guard is a heuristic
+keyed to the size mismatch in the reported screenshot rather than tuned against
+that scene.
+
 ## 2026-09-22 — SAM 3.1 and native DARTF FP16 on the RTX 3080
 
 Installed both backends on the home RTX 3080 and ran their startup checks; an

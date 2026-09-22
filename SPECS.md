@@ -81,7 +81,9 @@ and a webcam UI that switches backends. See [temp-devlog.md](temp-devlog.md) for
 the measurements and the reasoning behind them.
 
 The webcam menu offers SAM3 video, SAM 3.1 (normal/compiled), SAM3 image + ByteTrack,
-YOLOE text, Hybrid (SAM3 seed to YOLOE), and experimental DARTF. All adapters return a per-frame
+YOLOE text, Hybrid (SAM3 seed to YOLOE), Hybrid (SAM 3.1 seed to YOLOE), and
+experimental DARTF. Either hybrid re-grounds when it loses the object, and on a
+selectable frame interval; each re-ground restarts that run's track IDs. All adapters return a per-frame
 `list[Instance]` containing a pixel mask, box, confidence and optional object ID.
 This does not yet supply Unity's world position or diameter.
 

@@ -147,17 +147,33 @@ models' relative robustness.
   confidence even on the largest checkpoint (yoloe-11l-seg), vs. SAM3 finding
   it cleanly. Don't take a single fixed-clip empty-scene benchmark's word for
   a model's quality — this only showed up once tested against a real object.
-- **Hybrid (SAM3 seed -> YOLOE track)** — SAM3 grounds the prompt once (slow,
-  ~1s, but reliable on niche nouns), then every instance it found seeds
-  YOLOE's visual-exemplar mode. The exact seed image is copied in BGR and
-  supplied as `refer_image` at the first YOLOE step; the resulting embeddings
-  are reused on later frames with `persist=True`. The old implementation
-  applied the original boxes to each new frame, so motion could replace the
-  intended exemplars with background. It never preserved the claimed frozen
-  snapshot. See the [YOLOE visual-prompt API](https://docs.ultralytics.com/models/yoloe/#visual-prompts)
-  for how reference images install persistent embeddings. Whether this
-  corrected handoff is robust enough for live pose changes and occlusion is
-  still an open question.
+- **Hybrid (SAM3 seed -> YOLOE track)** and **Hybrid (SAM 3.1 seed -> YOLOE
+  track)** — a grounding model finds the prompt (slow, ~1s, but reliable on
+  niche nouns), then every instance it found seeds YOLOE's visual-exemplar
+  mode. The exact seed image is copied in BGR and supplied as `refer_image` at
+  the first YOLOE step; the resulting embeddings are reused on later frames
+  with `persist=True`. See the [YOLOE visual-prompt API](https://docs.ultralytics.com/models/yoloe/#visual-prompts)
+  for how reference images install persistent embeddings. The two entries
+  differ only in the seeder: the SAM3 one shares the video tab's in-process
+  fp16 model, the SAM 3.1 one keeps a Docker worker open for the stream so a
+  re-ground costs one inference rather than a container boot.
+
+  Both re-ground when YOLOE returns nothing, and optionally every N frames via
+  the webcam tab's re-ground slider. The schedule is off by default because
+  installing fresh exemplars rebuilds YOLOE's tracker and **restarts the track
+  IDs**. On an RTX 3080 at 640x480 a quiet YOLOE frame is ~35ms against ~750ms
+  for a SAM 3.1 re-ground, so the interval sets the average rate: ~28 fps at 0
+  (lost only), ~21 fps at 60, ~9 fps at 10 (the last measured directly).
+
+  YOLOE matches the exemplar embedding, not the words, so a thin exemplar (a
+  pen, a watch strap) generalizes badly — observed locking onto a whole torso
+  at 0.29, over the 0.15 confidence floor. Nothing downstream can tell that box
+  is wrong, so a bad frame used to be absorbing: the only corrective trigger
+  was zero detections. Boxes more than `drift_scale` (default 8x) the biggest
+  seeded box in area are now rejected, which empties the frame and re-grounds.
+  A drift onto something *similar in size* to the real object is not caught by
+  area alone; that needs the interval. Live robustness through pose change and
+  occlusion is still an open question.
 
 ## Regression checks
 
@@ -173,6 +189,10 @@ For a real-model check, use an image containing a concept SAM3 can detect:
 ```powershell
 .\.venv\Scripts\python.exe tests\smoke_hybrid.py "path\to\photo.jpg" "meatball"
 ```
+
+Add `--sam31` to ground with the SAM 3.1 Docker worker instead of in-process
+SAM3, and `--reground 2` to force scheduled re-grounds inside the run and print
+the track IDs either side of them.
 
 This requires cached SAM3 weights and a local `yoloe-11l-seg.pt` (or `--model`
 pointing to a local checkpoint). It translates the image away from its seed
@@ -263,6 +283,6 @@ real moving object (see below).
 | `track_video.py` | CLI: track a concept through a video, write an annotated `.mp4` |
 | `video_ui.py` | Gradio video tracker — "Video file" and "Webcam (live)" tabs |
 | `bench_realtime.py` | Benchmarks precision/resolution/compile configs against one captured webcam clip |
-| `yoloe_runner.py` | YOLOE text-prompt and SAM3-seeded-hybrid trackers — alternatives to `Sam3VideoTracker` in the webcam tab |
+| `yoloe_runner.py` | YOLOE text-prompt and seeded-hybrid trackers (SAM3 or SAM 3.1 seeder) — alternatives to `Sam3VideoTracker` in the webcam tab |
 
 Work is logged in `../Documentation/devlog.md`.

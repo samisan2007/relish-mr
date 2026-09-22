@@ -491,4 +491,4 @@ The only reliable backend (SAM3) is slow (~1fps). Every fast alternative tried b
 
 **Option 1 vs 2, precisely**: Option 1 changes *what does the tracking* — swaps YOLOE's semantic re-detection for a fundamentally different algorithm (motion/appearance continuity) that doesn't care what the object is, so it doesn't break on unseen angles. Option 2 keeps the exact same mechanism and just gives it more reference photos — a mitigation, not a structural fix.
 
-No direction has been chosen yet.
+**Update 2026-09-22 — Option 2 built, Option 1 still open.** The hybrid now re-grounds on a selectable interval and whenever YOLOE returns nothing, and can be seeded by SAM 3.1 instead of SAM3. Re-grounding replaces the exemplar set rather than accumulating it, because installing exemplars rebuilds YOLOE's tracker and restarts the IDs either way. The mechanism is unchanged, as Option 2 predicted, so the underlying re-detection weakness stands; what changed is that a bad frame is no longer permanent. Live pose-change testing against Option 1 has not been done.

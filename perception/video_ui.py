@@ -48,9 +48,11 @@ MODEL_SAM3 = "SAM3"
 MODEL_SAM3_IMG = "SAM3 image + ByteTrack"
 MODEL_YOLOE = "YOLOE (text prompt)"
 MODEL_HYBRID = "Hybrid (SAM3 seed -> YOLOE track)"
+MODEL_HYBRID_31 = "Hybrid (SAM 3.1 seed -> YOLOE track)"
 MODEL_DARTF = "DARTF (native SAM3, FP16 TensorRT)"
 MODEL_DARTF_FAST = "DARTF FAST (W8A8 TensorRT)"
-MODEL_CHOICES = [MODEL_SAM3, *SAM31_CHOICES, MODEL_SAM3_IMG, MODEL_YOLOE, MODEL_HYBRID, MODEL_DARTF, MODEL_DARTF_FAST]
+MODEL_CHOICES = [MODEL_SAM3, *SAM31_CHOICES, MODEL_SAM3_IMG, MODEL_YOLOE, MODEL_HYBRID,
+                 MODEL_HYBRID_31, MODEL_DARTF, MODEL_DARTF_FAST]
 # Backends whose model runs in a Docker worker: their per-frame timing includes transfer,
 # so the run summary reports request speed separately from total processing.
 WORKER_CHOICES = [*SAM31_CHOICES, MODEL_DARTF, MODEL_DARTF_FAST]
@@ -61,6 +63,7 @@ WORKER_CHOICES = [*SAM31_CHOICES, MODEL_DARTF, MODEL_DARTF_FAST]
 _bench_cache: dict[str, Sam3VideoTracker] = {}
 _yoloe_tracker: YoloeVideoTracker | None = None
 _hybrid_tracker: HybridVideoTracker | None = None
+_hybrid31_tracker: HybridVideoTracker | None = None
 # The image model is a separate ~3GB set of weights from the video model above, so it
 # loads on first use rather than at import — pick another backend and you never pay it.
 _sam3_image_tracker: Sam3ImageTracker | None = None
@@ -89,17 +92,26 @@ def get_bench_tracker(config_name: str) -> Sam3VideoTracker:
 def get_active_tracker(model_choice: str, config_name: str):
     """Returns (tracker, label) for whichever backend is selected. label goes in the
     status line and run log so entries stay distinguishable across backends."""
-    global tracker, _yoloe_tracker, _hybrid_tracker, _sam3_image_tracker
+    global tracker, _yoloe_tracker, _hybrid_tracker, _hybrid31_tracker, _sam3_image_tracker
 
-    if model_choice in SAM31_CHOICES or model_choice in (MODEL_DARTF, MODEL_DARTF_FAST):
-        # Both run their model inside a GPU Docker worker, so every Windows-side copy has
+    if model_choice in SAM31_CHOICES or model_choice in (MODEL_DARTF, MODEL_DARTF_FAST, MODEL_HYBRID_31):
+        # These run their model inside a GPU Docker worker, so every Windows-side copy has
         # to leave the card first — otherwise the two compete for the same 12GB and the
         # driver spills to system RAM rather than failing.
         tracker = _yoloe_tracker = _hybrid_tracker = _sam3_image_tracker = None
         _bench_cache.clear()
+        # The 3.1 hybrid is the exception: its YOLOE half is small and is meant to sit
+        # alongside the worker, so keep it cached rather than reloading on every Start.
+        if model_choice != MODEL_HYBRID_31:
+            _hybrid31_tracker = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if model_choice == MODEL_HYBRID_31:
+            if _hybrid31_tracker is None:
+                print("Loading Hybrid (YOLOE side; SAM 3.1 grounds from its Docker worker)...")
+                _hybrid31_tracker = HybridVideoTracker(seed_tracker=Sam31Runner())
+            return _hybrid31_tracker, MODEL_HYBRID_31
         if model_choice == MODEL_DARTF:
             from dartf_runner import DartfVideoTracker
 
@@ -138,7 +150,7 @@ def get_active_tracker(model_choice: str, config_name: str):
     if model_choice == MODEL_HYBRID:
         if _hybrid_tracker is None:
             print("Loading Hybrid (YOLOE side; SAM3 side reuses the baseline model)...")
-            _hybrid_tracker = HybridVideoTracker(sam3_tracker=get_bench_tracker(DEFAULT_CONFIG.name))
+            _hybrid_tracker = HybridVideoTracker(seed_tracker=get_bench_tracker(DEFAULT_CONFIG.name))
         return _hybrid_tracker, MODEL_HYBRID
 
     cam_tracker = get_bench_tracker(config_name)
@@ -198,7 +210,7 @@ def run_file(video_path, prompt, max_frames, stride, show_masks, show_boxes,
 
 
 def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, config_name, run_state,
-                request: gr.Request = None):
+                reground=0, request: gr.Request = None):
     """Grab frames from the local camera and yield annotated ones, until cancelled.
 
     Capture happens server-side (OpenCV) rather than in the browser, so the feed
@@ -219,6 +231,14 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
     except Exception as e:
         yield None, f"Failed to load '{model_choice}': {e}", run_state
         return
+
+    if isinstance(cam_tracker, HybridVideoTracker):
+        # Set it on the cached tracker rather than through the constructor, so moving the
+        # slider takes effect on the next Start without reloading YOLOE. The interval goes
+        # in the label because it changes both fps and the ID count the log reports.
+        cam_tracker.reground_every = int(reground)
+        if reground:
+            label = f"{label} reground {int(reground)}"
 
     capture = cv2.VideoCapture(int(camera_index), cv2.CAP_DSHOW)
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -251,7 +271,8 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
     try:
         yield None, f"Starting {label}; compiled first frames can take several minutes. Stop cancels the run.", {}
         try:
-            if isinstance(cam_tracker, Sam31Runner) or model_choice in (MODEL_DARTF, MODEL_DARTF_FAST):
+            if isinstance(cam_tracker, Sam31Runner) or model_choice in (
+                    MODEL_DARTF, MODEL_DARTF_FAST, MODEL_HYBRID_31):
                 session = cam_tracker.start_stream(prompt.strip(), on_started=on_started)
             else:
                 session = cam_tracker.start_stream(prompt.strip())
@@ -378,12 +399,32 @@ with gr.Blocks(title="Relish video tracker") as demo:
 | SAM3 | Text grounding with object memory; survives rotation. Warms up over ~8 frames. |
 | SAM3 image + ByteTrack | No memory — re-detects per frame, IDs by overlap. Drops IDs on fast motion. |
 | YOLOE | Fast text detection; weak on specific food nouns. |
-| Hybrid | SAM3 seeds once, then YOLOE tracks. |
+| Hybrid | SAM3 grounds, then YOLOE tracks; re-grounds whenever it loses every detection. |
+| | YOLOE matches the seeded exemplars, not the words, so boxes far larger than them are rejected as drift. |
+| Hybrid (SAM 3.1) | Same, with SAM 3.1 grounding from its Docker worker. Slow to start, then YOLOE speed. |
 | DARTF | FP16 TensorRT + native SAM3 memory, via Docker. Needs locally built engines. |
 | DARTF FAST | W8A8 TensorRT + lightweight tracker, via Docker. Needs the RTX 3080 FAST build. |
 
 Streaming keeps duplicate tracks the file tab would prune, so expect more false
 positives here. Measurements live in `temp-devlog.md`.
+
+**Re-ground interval.** A hybrid re-runs its grounding model on that frame. On an RTX
+3080 at 640x480 a quiet YOLOE frame is ~35ms, while a SAM 3.1 re-ground frame is ~750ms
+when it finds something (~400ms when it does not, since nothing is reinstalled), so the
+interval sets the average rate:
+
+| Every N frames | Average | What it feels like |
+|---|---|---|
+| 0 (lost only) | ~28 fps | No hitch until the track drops |
+| 120 | ~24 fps | A pause every ~4s |
+| 60 | ~21 fps | A pause every ~3s |
+| 30 | ~17 fps | A pause every ~1s |
+| 10 | ~9 fps | Pauses dominate |
+
+Measured directly at N=10 (9.0 fps) and N=0; the rest follow from the two frame costs.
+Each re-ground also **restarts the track IDs** — installing new exemplars rebuilds
+YOLOE's tracker — so a short interval inflates the ID count in the run log: the same
+40-frame clip logged 3 IDs at N=10 against 1 at N=30.
 """
                 )
             w_view = gr.Image(label="Live", type="numpy", height=520)
@@ -400,6 +441,11 @@ positives here. Measurements live in `temp-devlog.md`.
             with gr.Row():
                 w_masks = gr.Checkbox(value=True, label="Segmentation masks")
                 w_boxes = gr.Checkbox(value=True, label="Bounding boxes")
+            w_reground = gr.Slider(
+                0, 300, value=0, step=10,
+                label="Hybrid re-ground interval, frames (0 = only when the track is lost; "
+                      "ignored unless Model is a Hybrid)",
+            )
             with gr.Row():
                 w_start = gr.Button("Start", variant="primary")
                 w_stop = gr.Button("Stop")
@@ -412,7 +458,7 @@ positives here. Measurements live in `temp-devlog.md`.
 
             stream_event = w_start.click(
                 webcam_loop,
-                [w_prompt, w_masks, w_boxes, w_camera, w_model, w_config, w_run_state],
+                [w_prompt, w_masks, w_boxes, w_camera, w_model, w_config, w_run_state, w_reground],
                 [w_view, w_info, w_run_state],
                 show_progress="hidden",
                 concurrency_id="perception-gpu", concurrency_limit=1,
