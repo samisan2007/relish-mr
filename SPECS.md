@@ -265,6 +265,124 @@ the object's class.
   remembers where objects were and what happened to them, for help with
   multi-step tasks.
 
+### 9. Scene/activity understanding — what is the cook doing
+
+A different question from segmentation: not "where is the food" but "what
+action is happening, on what surface" (e.g. cutting lettuce on a wood board).
+This is a captioning/VLM task, not a detector, so it doesn't need a dataset or
+training. Send a frame (or a short recent window) to a vision-language model
+at low rate, maybe 0.5-1 Hz, and ask directly.
+
+- **[Gemini Robotics ER 2](https://ai.google.dev/gemini-api/docs/models/gemini-robotics-er-2-preview)**
+  is purpose-built for this: it does video "moment finding and progress
+  classification," i.e. it can say what step of a task is happening right now,
+  not just caption a still. Has a streaming Live API variant
+  (`gemini-robotics-er-2-streaming-preview`). The closest off-the-shelf answer
+  to this question. Pricing and latency aren't documented on that page.
+- **Gemini 3 Flash / GPT-5**, general-purpose, prompted directly on sampled
+  frames. Likely the same call already used for the portion/calorie question
+  (item 7) could return the action too — one model call, two answers.
+- **[DeepSeek `deepseek-flash`](https://api-docs.deepseek.com/guides/vision/)**:
+  vision-capable, but **static images only, no video/streaming input**, and no
+  documented object detection or grounding. Would work as a periodic-frame
+  captioner (same shape as the sampled-frame approach above) but not for
+  anything needing continuous video or spatial grounding. No pricing/latency
+  in the docs; check separately before relying on it.
+- **[Qwen3-VL](https://arxiv.org/pdf/2511.21631)** (4B/8B/30B/235B, open
+  weights): the 8B is reported competitive with much larger closed models on
+  video benchmarks. Relevant if this should run locally instead of a cloud
+  API — the project already runs everything else on the local PC.
+- **[Moondream 3](https://moondream.ai/blog/moondream-3-preview)** (9B MoE,
+  2B active): small, fast, self-hostable, and does *grounded* reasoning — it
+  can point at the part of the image it's reasoning about, not just emit text.
+  Worth trying if latency/cost matters more than accuracy.
+- Dedicated egocentric action-recognition research exists
+  ([EPIC-KITCHENS-100](https://epic-kitchens.github.io/), verb+noun labels
+  like "cut lettuce") but means training a closed-vocabulary classifier.
+  A general VLM prompted well should beat this on open-ended food/action
+  variety for an API call instead of a training run; only worth it if a VLM
+  proves too slow/expensive/inaccurate in practice.
+  [Vinci](https://arxiv.org/pdf/2412.21080) is a real-time egocentric
+  assistant built for step-by-step task guidance, closer to this product's
+  shape than a generic VLM, worth reading before dismissing this path.
+
+### 10. Reviewed links: relevance notes (2026-09-23)
+
+Ranked by usefulness to us.
+
+- **[EPFL-Smart-Kitchen](https://cnai.epfl.ch/EPFL-Smart-Kitchen/): high.**
+  29.7 h of 16 people cooking 4 recipes, with a HoloLens 2 egocentric camera
+  plus 9 RGB-D cameras, hand pose, body motion, eye gaze and IMUs. It has
+  60,189 dense action labels: 33 verbs × 79 nouns, 763 fine-grained actions.
+  Benchmarks cover vision-language, action recognition and pose-based action
+  segmentation. It is the closest public match to our setup: head-mounted MR,
+  a kitchen, hand pose. Use it as a **test set**. We could run the item 9 VLMs
+  on its egocentric clips and score them against real labels, instead of
+  judging by eye. Its hand-pose-based action segmentation also maps onto the
+  Quest hand joints we get for free. Data is on Zenodo and HF, code is on
+  GitHub. The license isn't stated on the page, so check it before use.
+- **Roboflow few-shot PoC ([LinkedIn post](https://www.linkedin.com/posts/patrickdeschere_automate2026-ugcPost-7475547155395452929-Ho1u/)): high, as a method.**
+  - Zero-shot models missed a specific part. About 10 frames were hand-labeled
+    with SAM-assisted "Smart Select", then a first RF-DETR model was trained.
+    That model pre-labeled a few dozen more frames, which were corrected
+    before retraining. The output fed a step checklist.
+  - This is the fallback when SAM3 or YOLOE miss a food noun, which was a
+    real problem here: "meatball" peaked at 0.17 on YOLOE. **We already
+    generate the pre-labels.** SAM3 masks from our own clips can seed a small
+    detector trained on our kitchen.
+  - RF-DETR is a real-time detector from Roboflow, Apache 2.0, with a
+    segmentation variant. A trained closed-set model would also run far
+    faster than SAM3.
+  - The checklist overlay itself is a product idea close to ours: "did the
+    cook do each step?"
+  - A caveat from the comments: in step checking, the false negative is the
+    costly failure, because a missed step goes unnoticed.
+- **[V-JEPA 2](https://ai.meta.com/research/vjepa/): medium, for later.**
+  Meta's self-supervised video world model. It outputs features, not text, so
+  it needs a trained probe or an LLM attached. Its paper reports
+  state-of-the-art action *anticipation* on EPIC-KITCHENS-100: predicting the
+  cook's next action, not just naming the current one.
+  [Code](https://github.com/facebookresearch/vjepa2) ·
+  [paper](https://arxiv.org/abs/2506.09985). More work than prompting a VLM.
+  Worth it only if we want "you're about to ..." guidance and VLM latency is
+  too high.
+- **[Sapiens](https://github.com/facebookresearch/sapiens) /
+  [Sapiens2](https://github.com/facebookresearch/sapiens2): low-medium.**
+  Meta's human-centric models (0.3B-2B, 1024 px) for 2D pose including hand
+  keypoints, body-part segmentation, depth and normals. Built for images of
+  people seen from outside. Quest hand tracking already gives us better hand
+  joints for free. Its body-part segmentation could clean up hand and arm
+  false positives if projecting the joints (item 5) proves too coarse.
+- **[Recognize Anything (RAM/RAM++)](https://recognize-anything.github.io/): low-medium.**
+  An image tagger with 6,400+ tags, from 2023, designed to feed
+  Grounded-SAM. Use case: a cheap "what's on the counter?" pass that suggests
+  prompts for SAM3, so the cook doesn't have to name the food. A VLM (item 9)
+  does the same job and also describes the action. Only worth it if VLM
+  cost or latency becomes a problem.
+- **[FastVLM](https://huggingface.co/apple/FastVLM-1.5B-int8): low.**
+  Apple's compact VLM, with up to 7.9× faster time to first token than
+  similar models. This checkpoint is MLX for iOS and macOS, and the Apple
+  AMLR license restricts commercial use. It doesn't fit a Windows plus CUDA
+  PC, and the Quest is Android. The idea is useful: a fast vision encoder
+  that cuts image tokens. For local VLMs, Qwen3-VL and Moondream 3 (item 9)
+  fit our stack.
+- **[DeepSeek vision](https://api-docs.deepseek.com/guides/vision/): low-medium.**
+  Covered in item 9. `deepseek-flash` handles static images only: no video,
+  no grounding. It works as a frame captioner and nothing more.
+- **[Cognition in the Wild](https://mitpress.mit.edu/9780262581462/cognition-in-the-wild/)
+  (Hutchins, 1995): design framing, not a tool.** It introduced distributed
+  cognition: thinking is spread across people, tools and the environment,
+  not held only in one head. For us, the kitchen plus the headset form one
+  cognitive system. Placing state *in the world* (portion markers on the
+  food, step progress where the work happens, as in the Roboflow checklist)
+  should beat telling the cook things they must remember. That supports
+  world-anchored widgets (item 1) over a floating screen.
+- **[arXiv 2601.12134](https://arxiv.org/html/2601.12134): not relevant.**
+  This is "Human-Human-AI Triadic Programming", a study of pair programming
+  with a shared AI. The only loose thread: a *shared* AI made pairs more
+  accountable than personal AIs did. That might matter if two people cook
+  together, but not now. Possibly the wrong link.
+
 ### Cheapest experiments, in order
 
 1. Run the QuestCameraKit or PCA CameraToWorld sample in our scene and raycast
@@ -277,6 +395,11 @@ the object's class.
 5. Benchmark EfficientSAM3, EOVSAM and YOLOE-26 on the same food clips. By this
    point those can be real Quest recordings with their pose logs.
 6. Decide what a portion is, then try the VLM route before the geometry route.
+7. Prompt Gemini Robotics ER 2 (or the same VLM as step 6) on a sampled frame
+   for the current action, alongside the portion question. Score it on
+   EPFL-Smart-Kitchen's egocentric clips against their action labels.
+8. If a food noun keeps failing zero-shot, use SAM3 to pre-label about 10
+   frames from our clips, then train RF-DETR on them (the Roboflow loop).
 
 If step 3 holds up, the tracking question under **Open** reduces to food in the
 cook's hands. DARTF, the hybrids and the 8-10 fps target could then be shelved.
