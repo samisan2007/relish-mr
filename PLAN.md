@@ -5,17 +5,15 @@ Measurements and completed work: [DEVLOG.md](DEVLOG.md).
 
 ## Resume checkpoint
 
-- Complete: baseline fixes committed/pushed as `5f76de4`; offline candidate
-  preparation, pinned downloads and synthetic GPU smokes; 60 unit tests passing.
-- Candidate checkpoint: `Prepare offline model comparisons` on `dartf` includes
-  the candidate code/tests and documentation. Preserve `perception/candidates-local/`
-  for the ignored weights, cases and runs; these are not included in Git.
+- Done and pushed on `dartf`: baseline fixes, offline candidate preparation and
+  a documentation cleanup. Completed work and results are in the DEVLOG.
+- Local only, not in Git: `perception/candidates-local/` (candidate weights,
+  cases and runs) and `perception/runs/` (replay outputs). Preserve both.
 - Next batch: annotate physical-object loss windows in both existing pen clips
   and preserve baseline replay results before applying association changes (§1).
 - Then compare native/HF EdgeTAM through real movement and reseeding, and measure
   live timing separately. Food recordings and Quest integration remain pending.
-- Update the relevant Markdown files after every completed batch or task, even
-  when the larger task continues; keep this checkpoint current when resuming.
+- Keep this checkpoint current when resuming (see AGENTS.md).
 
 ## Direction
 
@@ -29,24 +27,10 @@ Official EdgeTAM already batches ordinary propagation; compare it before writing
 custom batching. The isolated harness applies one recorded upstream reshape fix.
 Batching may improve GPU utilization, not make work independent of object count.
 
-## 0. Baseline and small fixes
-
-Committed baseline: `5f76de4` on `dartf` (pushed before candidate preparation).
-- Replace obsolete assistant instructions and reconcile the active spec.
-- Pin Transformers, Ultralytics and timm to the installed adapter-compatible
-  versions. Other dependencies are not fully locked yet.
-- YOLOE: ground immediately at startup and retry on the next request after a new
-  loss. Continuing failures wait 500 ms after an attempt finishes. Existing
-  exemplars keep searching between retries; before the first seed, YOLOE cannot
-  search. `retry_seconds=0` restores retry-every-request for comparison.
-- Replay: unique directories, clip/source hashes, settings, host packages, GPU,
-  Git state when available, completion/failure state and p95 timing. Clean up the
-  camera, writer and worker on failure as well as success.
-
-Checkpoint each reviewed experiment before full comparisons. Dirty-state flags and hashes
-identify runs but cannot reconstruct uncommitted code. The manifest does not yet
-capture every resolved checkpoint revision or worker package; record those for
-model comparisons. Existing artifacts without provenance remain historical evidence.
+Commit each reviewed experiment before full comparisons: replay manifests record
+hashes and dirty state but cannot reconstruct uncommitted code. They do not yet
+capture every checkpoint revision or worker package; record those for model
+comparisons. Replay outputs without a manifest are historical evidence only.
 
 ## 1. Lost-object diagnosis — next implementation task
 
@@ -64,6 +48,10 @@ duplicate suppression, failed association or compaction. Test one change at a ti
    `retire_after=1` currently hides a track after one unsupported keyframe.
 4. Test an early keyframe after a visible track disappears, with a cooldown to
    prevent repeated expensive detection on every empty frame.
+
+Merged objects have a second known source: SAM3 sometimes returns one mask
+covering two touching pens (5 keyframes of clip 2), and it can outscore the
+single-pen masks and seed a track.
 
 Acceptance: improve annotated failure windows without introducing swaps, duplicates,
 merged objects or persistent ghosts elsewhere in either clip. Report recovery time,
@@ -92,12 +80,30 @@ budget from the first Quest measurements; FPS is not sufficient.
 
 Use PyTorch Profiler with 1, 3 and about 12 visible objects. Separate shared image
 features, per-object memory/decoder work, CPU mask operations and transfers.
-Do not reimplement the existing image-feature cache.
+Count objects in the EdgeTAM session as well as visible ones: retired tracks
+still cost a full pass each until compaction. Do not reimplement the existing
+image-feature cache.
 
 First use the [offline candidate harness](perception/candidates/README.md) to compare
 native EdgeTAM against Transformers on shared seeds and frames. Synthetic smokes
 check execution only. Native preprocessing, postprocessing and memory retention
 differ; a speed gain is not evidence of equivalent tracking decisions.
+
+Use short windows from both existing pen clips with identical initial masks and
+source timestamps. Inspect propagation over a keyframe gap, then test reseeding.
+Score selected masks and physical identities against human-reviewed annotations;
+SAM3 detections are a diagnostic reference, not ground truth. Include controlled
+frame skipping, recording elapsed source time and keyframe cadence; this stress
+test complements, but does not replace, timestamp-paced latest-frame replay.
+
+Before UI integration, test native EdgeTAM in a separate Windows environment
+without the optional CUDA postprocessing extension. Windows compatibility is not
+yet validated. Measure full request latency in the intended deployment, including
+preprocessing, mask transfers, association and any worker transport. The historical
+DARTF FAST 159 ms request / 107 ms model result is a warning about that worker's
+overhead, not a fixed Docker penalty. If a worker is needed, evaluate placing
+detector and tracker together with shared GPU state to avoid model-to-model trips.
+Co-location still leaves the external frame/result transfer to measure.
 
 If native EdgeTAM cannot meet the integration/quality checks and object-specific
 work dominates, consider batching compatible ordinary propagation steps.
@@ -135,8 +141,7 @@ calibration and size stability before reporting metric portions.
 
 ## 5. Conditional model and product experiments
 
-Preparation is authorized now, before food recordings and Quest availability.
-Pinned sources/checkpoints and isolated offline commands are in
+Preparation is done: pinned sources/checkpoints and isolated offline commands are in
 [perception/candidates/](perception/candidates/README.md). This pre-work does not
 replace the lost-object diagnosis or earn automatic UI integration.
 All three trackers passed repeated synthetic GPU smokes; EV-M image inference
@@ -150,6 +155,9 @@ Earn a UI integration with a bounded offline comparison first:
   if handled-food quality warrants it after association fixes.
 - [EfficientSAM3 EV-M](https://github.com/SimonZeng7108/efficientsam3): test food-noun
   recall and image masks before trying it as a cheaper keyframe detector.
+  The 0.1 threshold test is already complete; evaluate more food photos with fixed
+  prompt/threshold settings. Compare `ball` and `meatball` as a vocabulary probe,
+  including non-food round objects to expose false positives from the broader noun.
 - Keep DARTF available; further engine work needs evidence from food footage.
 - [EOVSAM](https://arxiv.org/abs/2608.02284) is lower priority: its headline gain
   concerns large vocabularies, not our single-prompt temporal workload.

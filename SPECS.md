@@ -46,10 +46,8 @@ does the seeing.
   Passthrough, Passthrough Camera Access.
 - **No on-device inference.** The Meta Image Segmentation building block only
   offers Yolo11n-seg — 80 fixed COCO classes, no food nouns. Rejected 2026-09-09.
-- **Perception runs on the PC** in Python (`perception/`), testing SAM3,
-  SAM 3.1 Object Multiplex, YOLOE and DARTF.
-- **The test UI defaults to SAM3 video, `fp16 autocast, 1008px`.** This is the
-  current testing default, not a final production tracking choice.
+- **Perception runs on the PC** in Python (`perception/`). Several detector
+  and tracker backends are under test; see [Perception side](#perception-side).
 - **The widget is decoupled from perception.** `PortionWidget` takes a world
   position and a diameter in metres and knows nothing about how they were derived.
 
@@ -64,11 +62,8 @@ does the seeing.
   measure, not ruled out by architecture. See [DEVLOG.md](DEVLOG.md) and [PLAN.md](PLAN.md).
 - **Food-tracking acceptance target.** Aim for at least 8-10 fps with useful
   masks and correct identities while the food is handled (see The product): hand
-  motion, kneading and shape change, crossing, and hand occlusion. SAM 3.1's initial successful offline test reached 5.65 fps compiled
-  on the RTX 5070; on the home RTX 3080 the same worker path measured 2.68 fps
-  eager and 3.42 fps compiled. Live and end-to-end timings must be measured
-  separately. False positives and missed food instances remain unresolved, so no
-  final backend is selected.
+  motion, kneading and shape change, crossing, and hand occlusion. Live and
+  end-to-end timings must be measured separately from replays.
 - **Quest ↔ PC transport.** Not built. No protocol, no codec, no latency budget.
 - **Where the widget gets anchored.** Screen-space projection of the mask
   centroid, a depth hit, or an MRUK anchor — undecided.
@@ -91,57 +86,24 @@ The widget is a sphere *for now*. The API is the contract; the mesh is not.
 
 ## Perception side
 
-`perception/` — SAM3 image + video testers, YOLOE trackers, a replay benchmark,
-and a webcam UI that switches backends. See [temp-devlog.md](temp-devlog.md) for
-the measurements and the reasoning behind them.
+`perception/` holds a picture tester, a video UI with file and webcam tabs, a
+command-line replay benchmark and an offline candidate harness. The webcam menu
+offers these backends:
+- SAM3 video, SAM 3.1 (normal/compiled) and SAM3 image + ByteTrack;
+- keyframe hybrids: SAM3 image, SAM 3.1 or SAM 3.1 compiled keyframes, with
+  EdgeTAM between them;
+- YOLOE text, and YOLOE hybrids seeded by SAM3 or SAM 3.1;
+- DARTF native FP16 and DARTF FAST (RTX 3080), both experimental.
 
-The webcam menu offers SAM3 video, SAM 3.1 (normal/compiled), SAM3 image + ByteTrack,
-keyframe hybrids (SAM3 image, SAM 3.1 or SAM 3.1 compiled keyframes, with
-EdgeTAM between them), YOLOE text, Hybrid (SAM3 seed to YOLOE), Hybrid (SAM 3.1
-seed to YOLOE), and experimental DARTF. Either YOLOE hybrid retries grounding
-immediately after a new loss, then waits 500 ms after each attempt while still
-lost; an optional frame interval refreshes exemplars while tracking. Installing
-fresh exemplars resets IDs; unsuccessful attempts do not. Keyframe hybrids try
-to preserve IDs by matching detections to tracks. All adapters return a per-frame
-`list[Instance]` containing a pixel mask, box, confidence and optional object ID.
-This does not yet supply Unity's world position or diameter.
+Every adapter returns a per-frame `list[Instance]`: a pixel mask, box,
+confidence and optional object ID. None yet supplies Unity's world position or
+diameter.
 
-SAM 3.1 is also selectable in the picture and video-file modes. It uses the
-pinned official 3.1 checkpoint and source in an optional Linux GPU Docker
-worker, BF16 attention through PyTorch, and up to 16 tracked regions. Models
-load on selection; choosing SAM 3.1 releases the UI process's other model caches.
-Picture mode applies the confidence threshold to detection admission and output.
-Both video modes process incoming frames causally, retain the model's object
-memory, and discard memory older than 32 frames except the first conditioning
-frame per bucket. This differs from the offline demo and may affect long
-occlusions. Each run has fresh IDs, and Stop/failure closes its worker and camera,
-including during compilation. File and webcam GPU work is serialized in the UI.
-Compilation is opt-in and covers only the detector, whose shapes are fixed. It
-costs one pause of about 20 s on frame 1 with a warm cache. Recorded-video
-results distinguish playback FPS, total processing speed and request speed after
-the first eight frames (which can still include later compilation). Webcam
-request timing includes Docker transfer but excludes capture,
-overlays and browser delivery. See [SAM 3.1 setup and tests](perception/sam31/README.md).
-
-DARTF is optional and loads only when selected. Its native SAM3 memory tracker
-and FP16 TensorRT detector run in a GPU Linux Docker container; the Windows
-process handles camera capture and overlays. Engines must be built locally for
-the GPU/runtime. Full memory is retained, with additional objects processed in
-batches of two. This experiment does not implement the upstream W8A8 recipe.
-Missing assets or startup failures must produce a UI error and release the
-camera. Real inference, mask transfer and restart pass the synthetic smoke
-check on both the RTX 5070 and the home RTX 3080, which builds its own SM86
-engines. See [setup and validation](perception/dartf/README.md); identity
-continuity through real motion and occlusion still needs evaluation before
-recommending this backend.
-
-A separate [RTX 3080 FAST experiment](perception/dartf/RTX3080.md) prepares the
-W8A8 detector, fused mask head, lightweight tracker and frame pipeline. Its
-recorded-video test separates headless and rendered timings and saves IDs. FAST
-is also in the webcam menu. On the 3080, the repeated-dog input reached 6.35 frame
-requests/sec after the transfer fix; this is not a food-motion quality result.
-It is not a selected production backend. The upstream RTX 4090 FPS claim is not
-a local performance target or guarantee.
+Details live next to the code: [perception/README.md](perception/README.md) for
+setup, backends and replay; [SAM 3.1](perception/sam31/README.md);
+[DARTF](perception/dartf/README.md) and [DARTF FAST](perception/dartf/RTX3080.md);
+[offline candidates](perception/candidates/README.md). Measurements are in
+[DEVLOG.md](DEVLOG.md).
 
 ## Ideas to explore
 
@@ -152,9 +114,8 @@ pen clips; follow [PLAN.md](PLAN.md) for current priorities and unresolved work.
 
 ### 1. Use capture-time world placement to compensate for head motion
 
-This is the biggest lever, and [temp-devlog.md](temp-devlog.md) already raises
-it ("The question this test actually raises"). Tag every frame sent to the PC
-with its capture timestamp, camera pose and intrinsics. Then lift each detection
+Tag every frame sent to the PC with its capture timestamp, camera pose and
+intrinsics. Then lift each detection
 into world space on the Quest, using the pose from *that* frame. From there:
 
 - Capture-time pose avoids placing an old detection using a newer head pose.
@@ -199,8 +160,8 @@ of deforming or partly occluded food. The PC can initially remain purely 2D.
     upstream README still lists Stage-2 memory-weight release as unfinished;
     our EV-M candidate test covers image detection, not validated video tracking.
   - SAM3-LiteText keeps SAM3's vision encoder and cuts the text encoder by 88%.
-  - No speed figures are published, so we'd benchmark on the 3080 and check
-    that food nouns still work.
+  - EV-M is set up in the [offline candidate harness](perception/candidates/README.md).
+    First food-photo smokes are in the DEVLOG; food-noun recall is still open.
 - [EOVSAM](https://arxiv.org/abs/2608.02284) (hustvl, August 2026): runs SAM3's
   open-vocabulary segmentation in one pass. It claims up to 338× faster than
   vanilla SAM3, and code is released. It is the newest candidate. Its main
@@ -219,13 +180,16 @@ a mask with temporal memory, can be seeded by a SAM3 mask, and don't depend on
 the object's class.
 - [EdgeTAM](https://github.com/facebookresearch/EdgeTAM) (Meta, CVPR 2025):
   22× faster than SAM 2, 16 fps on an iPhone 15 Pro, J&F close to SAM 2.
-  [Already in HF transformers](https://huggingface.co/docs/transformers/en/model_doc/edgetam).
+  The keyframe hybrid (item 11) uses the
+  [HF transformers port](https://huggingface.co/docs/transformers/en/model_doc/edgetam);
+  the official implementation is in the offline candidate harness.
 - [EfficientTAM](https://arxiv.org/pdf/2411.18933): about 2× faster than SAM 2,
   with under 2 J&F lost.
 - [StreamDAM](https://arxiv.org/html/2608.03912) (August 2026): paper only, no
   code. It runs a SAM 2-family tracker at about 30 fps and uses a learned
-  "presence" signal to decide when to re-detect. Relevant to our re-ground
-  triggers, which are currently a fixed interval plus "zero detections".
+  "presence" signal to decide when to re-detect. Relevant to our re-detection
+  triggers: currently a fixed keyframe interval in the keyframe hybrid, and
+  loss plus a 500 ms retry cooldown in the YOLOE hybrids.
 
 ### 5. Use hand tracking
 
@@ -391,9 +355,6 @@ Ranked by usefulness to us.
   PC, and the Quest is Android. The idea is useful: a fast vision encoder
   that cuts image tokens. For local VLMs, Qwen3-VL and Moondream 3 (item 9)
   fit our stack.
-- **[DeepSeek vision](https://api-docs.deepseek.com/guides/vision/): low-medium.**
-  Covered in item 9. `deepseek-flash` handles static images only: no video,
-  no grounding. It works as a frame captioner and nothing more.
 - **[Cognition in the Wild](https://mitpress.mit.edu/9780262581462/cognition-in-the-wild/)
   (Hutchins, 1995): design framing, not a tool.** It introduced distributed
   cognition: thinking is spread across people, tools and the environment,
@@ -402,11 +363,6 @@ Ranked by usefulness to us.
   food, step progress where the work happens, as in the Roboflow checklist)
   should beat telling the cook things they must remember. That supports
   world-anchored widgets (item 1) over a floating screen.
-- **[arXiv 2601.12134](https://arxiv.org/html/2601.12134): not relevant.**
-  This is "Human-Human-AI Triadic Programming", a study of pair programming
-  with a shared AI. The only loose thread: a *shared* AI made pairs more
-  accountable than personal AIs did. That might matter if two people cook
-  together, but not now. Possibly the wrong link.
 
 ### 11. Keyframe hybrid: SAM3 finds objects, a fast tracker fills the gaps
 
@@ -418,7 +374,7 @@ detector schedule is a proposed experiment, not the current measured cadence.
 
 SAM3 video already works this way inside: a detector plus a SAM2-style tracker
 with memory. Our profile found the tracker costs about 70 ms per object, 75%
-of each frame (see [temp-devlog.md](temp-devlog.md)). So in practice this
+of each frame on a 13-object plate (DEVLOG, 2026-09-09). So in practice this
 means **keeping SAM3's detector for keyframes and replacing its heavy tracker
 with a cheaper one.**
 
@@ -441,7 +397,7 @@ Candidates for the fast half:
 | Tracker | Where | Notes |
 |---|---|---|
 | [EdgeTAM](https://github.com/facebookresearch/EdgeTAM) (Meta, Apache 2.0) | PC | Current fast tracker. Local pen results are in DEVLOG; handled-food quality is unverified. Published mobile FPS is not our pipeline's speed. |
-| SAM2.1-tiny / [EfficientTAM](https://arxiv.org/pdf/2411.18933) | PC | Same idea, slightly larger. Fallback if EdgeTAM loses the object. |
+| SAM2.1-tiny / [EfficientTAM](https://arxiv.org/pdf/2411.18933) | PC | Same idea, slightly larger. Fallback if EdgeTAM loses the object. SAM 2.1 tiny is in the offline candidate harness. |
 | Optical flow (DIS, KLT, RAFT-small) that shifts the last mask | PC or Quest | No model to train, very cheap. Fine across a 300-500 ms gap at moderate motion. Drifts with fast motion or deforming food; the next keyframe corrects it. |
 
 Research to borrow the matching logic from. Each is a detector-prompted SAM2

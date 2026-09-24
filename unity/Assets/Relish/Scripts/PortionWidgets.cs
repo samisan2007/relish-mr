@@ -3,8 +3,9 @@ using UnityEngine;
 
 /// <summary>
 /// One PortionWidget per tracked object. Feed it a frame of detections and it spawns,
-/// smooths, ages out and retires; the prefab stays dumb. Perception reports at ~1 fps,
-/// so positions are lerped between reports instead of snapped.
+/// smooths, ages out and retires; the prefab stays dumb. Perception reports far below
+/// the 90 Hz render rate (8-10 Hz at best), so positions are lerped between reports
+/// instead of snapped.
 /// </summary>
 public class PortionWidgets : MonoBehaviour
 {

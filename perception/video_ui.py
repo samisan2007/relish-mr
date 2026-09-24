@@ -436,7 +436,7 @@ with gr.Blocks(title="Relish video tracker") as demo:
 | SAM3 | Text grounding with object memory; survives rotation. Warms up over ~8 frames. |
 | SAM3 image + ByteTrack | No memory — re-detects per frame, IDs by overlap. Drops IDs on fast motion. |
 | Keyframe hybrid | SAM3 image mode every N frames; EdgeTAM (a light SAM 2) carries the masks between. Keyframes match to live tracks by mask overlap, so IDs persist. Each keyframe frame is slow (~250 ms), the rest fast. |
-| Keyframe hybrid (SAM 3.1) | Same, with SAM 3.1 image mode for the keyframes, from its Docker worker. Slow to start; compiled adds minutes more. |
+| Keyframe hybrid (SAM 3.1) | Same, with SAM 3.1 image mode for the keyframes, from its Docker worker. Slow to start; compiled adds a ~20 s pause on the first keyframe (longer on a cold cache). |
 | YOLOE | Fast text detection; weak on specific food nouns. |
 | Hybrid | SAM3 grounds, then YOLOE tracks; retries immediately after loss, then waits 500 ms between attempts. |
 | | YOLOE matches the seeded exemplars, not the words, so boxes far larger than them are rejected as drift. |
@@ -445,7 +445,7 @@ with gr.Blocks(title="Relish video tracker") as demo:
 | DARTF FAST | W8A8 TensorRT + lightweight tracker, via Docker. Needs the RTX 3080 FAST build. |
 
 Streaming keeps duplicate tracks the file tab would prune, so expect more false
-positives here. Measurements live in `temp-devlog.md`.
+positives here. Measurements live in `DEVLOG.md`.
 
 **Re-ground interval.** A hybrid re-runs its grounding model on that frame. On an RTX
 3080 at 640x480 a quiet YOLOE frame is ~35ms, while a SAM 3.1 re-ground frame is ~750ms

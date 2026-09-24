@@ -87,8 +87,8 @@ cd perception
 .\.venv\Scripts\python.exe tests\smoke_sam31_ui.py --compile
 ```
 
-The initial compiled UI smoke passed picture segmentation, 40 video frames and
-two webcam Start/Stop cycles. It measured 2.25 fps on file frame requests after
+The initial compiled UI smoke (2026-09-15, before detector-only compilation)
+passed picture segmentation, 40 video frames and two webcam Start/Stop cycles. It measured 2.25 fps on file frame requests after
 the first eight frames (including transfer and later compilation), and 155.2 s
 for the tracking/encoding loop including worker startup. Twelve region IDs persisted after
 confirmation. Short compiled webcam runs were dominated by compilation. These

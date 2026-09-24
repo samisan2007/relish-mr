@@ -150,7 +150,7 @@ class KeyframeHybridTracker:
     ):
         """sam3: the keyframe detector. A Sam31Runner runs SAM 3.1 image mode in its
         Docker worker, one per stream; the thresholds were tuned on SAM3's scores.
-        keyframe_every: run SAM3 on every Nth frame (10 at 25 fps is 2.5 Hz).
+        keyframe_every: run SAM3 on every Nth processed frame (10 at 10 fps is ~1 Hz).
         threshold: SAM3 detection score floor for seeding or creating a track.
         match_iou: minimum overlap (over the smaller mask) between a detection and a track.
         retire_after: consecutive keyframes a track may go unconfirmed by SAM3.

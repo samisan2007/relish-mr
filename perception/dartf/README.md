@@ -9,14 +9,13 @@ backbone, detector, segmentation head and SAM3 memory tracker in a GPU Docker
 container. It uses full memory (no spatial or query pruning). This is an FP16
 reference experiment, not DARTF's advertised W8A8 INT8 configuration.
 
-**Status, 2026-09-14:** ready for experimental webcam testing on this machine.
-Docker GPU access, ONNX exports, all six TensorRT engines and the real smoke
-check below pass on the RTX 5070. The translated meatball image retains 13
-confirmed IDs; a fresh stream restarts IDs at 1. Its last four frames average
-549 ms (1.8 fps) including transfer. This is a synthetic 13-object check, not a
-live two-pen benchmark or an occlusion test. All 17 unit tests and the
-model-stubbed UI check also pass. Keep SAM3 fp16 as the default while comparing
-tracking quality on the same recorded two-object clip.
+**Status:** runs in the webcam menu on the RTX 5070. Docker GPU access, ONNX
+exports, all six TensorRT engines and the real smoke check below pass. The
+translated meatball image retains 13 confirmed IDs; a fresh stream restarts IDs
+at 1. Its last four frames average 549 ms (1.8 fps) including transfer
+(2026-09-14, synthetic 13-object check). A live webcam run with pens reached
+about 5 fps (2026-09-24, approximate user report). Tracking quality through
+motion and occlusion has not been evaluated.
 
 The normal Windows perception environment still owns the webcam and overlays.
 Frames and masks travel over the container's standard input/output. The run log

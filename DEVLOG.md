@@ -2,53 +2,79 @@
 
 Running log, newest first. Update after each completed batch or task, including
 intermediate batches within a session: what changed, what it means, what's next.
-For *what we're building*, see [SPECS.md](SPECS.md).
-
-Detailed perception measurements and tracking experiments live in
-[temp-devlog.md](temp-devlog.md).
+For *what we're building*, see [SPECS.md](SPECS.md); for what comes next,
+[PLAN.md](PLAN.md). Older entries are history: later entries supersede them.
 
 ---
 
-## 2026-09-24 — Candidate code and documentation checkpoint
+## 2026-09-24 — Documentation and code cleanup
 
-Checkpoint subject: `Prepare offline model comparisons`, branch `dartf`, author
-`samisan <samisan2007@gmail.com>`. Includes the offline harness, regression tests,
-model pins, results documentation and standing documentation-update instruction.
-The recorded validation remains 60 passing unit tests and completed GPU smokes;
-this publication batch adds no inference changes. Weights, source checkouts and
-raw run artifacts remain ignored/local. The earlier uncommitted-state notes below
-describe the handoff before this checkpoint. Next: the lost-pen diagnosis in PLAN §1.
+Removed stale, duplicated and wrong statements before the next experiments.
+- **`temp-devlog.md` is merged into this log and deleted.** It was the older log
+  from another machine, kept to be merged later. Its 2026-09-14 and 2026-09-22
+  sections duplicated entries here. Its unique 2026-09-07 to 2026-09-10 history
+  is condensed below, with conclusions that were later disproved marked.
+- **Deleted `perception/sweep.py` and `perception/track_video.py`.** Both were
+  unreferenced first-batch scripts. `sweep.py` needed a local `Test Data/`
+  folder that no longer exists; the replay CLI
+  (`keyframe_hybrid.py --backend sam3video`) and the UI's file tab cover
+  `track_video.py`.
+- **Corrected wrong statements:**
+  - perception/README said YOLOE text takes 100-500 ms per frame (it is about
+    30 ms), grounding takes ~1 s (a few hundred ms), SAM3 plateaus at ~1 fps
+    regardless of config (3-3.6 fps at one or two objects), and the backbone
+    dominates SAM3's frame time (the per-object tracker does).
+  - An entry below said the YOLOE backends re-detect without tracking and
+    restart their IDs. They keep IDs between ordinary frames and reset them
+    only when fresh exemplars are installed. Two superseded estimates below
+    now carry notes.
+  - Code comments: the keyframe interval counts processed frames (every 10 at
+    10 fps is ~1 Hz), SAM3 video costs ~70 ms per tracked object, and the Unity
+    widget manager no longer assumes ~1 fps perception.
+- **Trimmed:**
+  - SPECS' perception section now links to the READMEs instead of repeating
+    them.
+  - Old SAM 3.1 fps figures left the acceptance target.
+  - The "biggest lever" claim for world placement went, along with a reviewed
+    link marked "not relevant" and a duplicate DeepSeek note.
+  - PLAN lost its finished §0 and stale commit notes. It gained two known
+    facts: SAM3's two-pen masks cause merges, and retired tracks still cost
+    EdgeTAM passes.
+  - The agent instructions no longer warn about an architecture that no
+    longer appears anywhere in the repo.
+- Removed Python `__pycache__` folders. Replay outputs in `perception/runs/` and
+  the local model setups stay.
 
-## 2026-09-24 — Context checkpoint and standing documentation instruction
+**Validation:** all 60 unit tests pass, and every relative link in the
+Markdown docs resolves. No model or GPU run was needed. **Git:** committed and pushed on `dartf`. **Next:** PLAN §1,
+the lost-object diagnosis.
 
-The user requires Markdown updates after **every completed batch or task**, even
-when more work remains. This instruction is now in `AGENTS.md`; saving context
-must not wait for a usage limit or the end of a session.
+## 2026-09-24 — Candidate checkpoint and comparison-plan review
 
-**Resume state:** offline candidate preparation is complete. The entry below
-contains measured results, compatibility fixes, validation and exact run IDs;
-[the candidate guide](perception/candidates/README.md) contains setup, replay
-commands and the recording checklist. The last code validation passed 60 unit
-tests plus GPU smokes. This checkpoint changes documentation only; no new
-inference or code tests were run.
+The offline candidate harness, its tests and its docs are committed and pushed
+as `ab7db58` on `dartf`. Weights, source checkouts, cases and runs stay in the
+ignored `perception/candidates-local/`.
+- On the same inputs, three objects took 32.8-33.2 ms per request with native
+  EdgeTAM and 55.2-61.3 ms with Transformers EdgeTAM (entry below). The 77 ms
+  keyframe-hybrid figure from clip replays includes association and our mask
+  post-processing, so it is not the matching baseline.
+- The native patch applies to upstream EdgeTAM revision
+  `7711e012a30a2402c4eaab637bdb00a521302c91`: one `view` becomes `reshape` in
+  `sam2/modeling/perceiver.py`. The harness verifies the source and records the
+  patch in run manifests.
+- PLAN §3 gained explicit checks:
+  - native EdgeTAM on Windows without the optional CUDA extension;
+  - the deployed request and transport cost;
+  - pen-clip propagation and reseeding, scored against human-reviewed identities;
+  - controlled frame skipping.
+- EV-M's next checks: more food photos at fixed settings, `ball` against
+  `meatball`, and non-food round objects as negatives.
+- Standing rule, now in AGENTS.md: update the Markdown docs after every
+  completed batch, not only at the end of a session.
 
-**Git/artifacts:** the last committed and pushed baseline is `5f76de4` on `dartf`.
-Candidate scripts/tests and the associated documentation remain uncommitted;
-preserve them when resuming. Sources, weights, the prepared case and run outputs
-remain locally in ignored `perception/candidates-local/`, so a future code commit
-will not upload those artifacts. No candidate containers remained running after
-the completed test batch.
-
-**Next concrete batch:** annotate lost-object windows by physical identity in
-`../Media/pen_test_vid.mp4` and `../Media/pen_vid_test_x3.mp4`, preserve baseline
-replay artifacts, and identify the first loss mechanism before changing association.
-Native/HF EdgeTAM comparison through motion and reseeding follows as a separate
-experiment. Do not infer handled-food quality from the synthetic timing results.
-
-**Still open:** loss/association fixes, timestamp-paced/live timing, sustained
-memory tests, real-motion candidate quality, EV-M food vocabulary/false positives,
-new food recordings and the Quest camera-to-widget loop. No production backend
-has been selected and no candidate was integrated into the UI.
+Previous-frame association and hiding a track after one missed keyframe are
+plausible causes of lost pens, not yet confirmed for each failure.
+**Next:** PLAN §1.
 
 ## 2026-09-24 — Offline candidate preparation and GPU smokes
 
@@ -229,8 +255,8 @@ perception has to track and measure it through that.
 
 **What this means:**
 - **Only the keyframe hybrids and the YOLOE backends reach the 8-10 fps target.**
-  The YOLOE backends re-detect each frame rather than track, and restart their
-  IDs.
+  The YOLOE backends detect by exemplar each frame and keep IDs between frames,
+  but reset them whenever fresh exemplars are installed.
 - **Compiling makes no difference to the SAM 3.1 keyframe hybrid.** A keyframe
   is 1 frame in 10, so saving ~90 ms on it is ~9 ms per frame. EdgeTAM's
   per-object cost between keyframes dominates.
@@ -270,6 +296,9 @@ fixed in [keyframe_hybrid.py](perception/keyframe_hybrid.py).
   - That costs about 25-35 ms per track on the clips.
   - A 13-meatball plate would then take about 350 ms per frame. That figure is
     extrapolated, not measured.
+  - *Superseded:* the offline candidate runs later measured Transformers EdgeTAM
+    propagation alone at about 150 ms with 10 objects. The clip figure also
+    counted retired tracks and our own per-track work.
 - So live runs only compare on the same content. Use the recorded clips.
 
 **1. One pen, two IDs.** Nothing compared tracks against each other.
@@ -488,12 +517,17 @@ writes visible to another in time. Both launchers now use the Docker volume
 eager on the same path, after roughly 2.8 minutes of one-time compilation that
 lands on the second frame, because the first frame runs eagerly. The apparent
 "loads, shows one frame, freezes" symptom was that compile, not a hang.
+*Partly superseded:* with objects in view, compilation also repeated whenever
+the object count changed. Fixed on 2026-09-24 by compiling only the detector.
+
+On a warm cache, frame 0 took 4.4 s, frame 1 141 s (nine components compiled at
+`max-autotune`) and frame 2 29 s, then 0.27-0.34 s per frame. Steady frames 3-5
+took 373 ms eager and 293 ms compiled. Frame 1 returns zero objects in both
+modes and IDs return at frame 2, which is the live path's normal behaviour.
 
 Both figures are below the 8-10 fps acceptance target, and both were measured on
-a stock photo translated across a synthetic frame. This PC has no `Media/`
-folder, so `tests/smoke_sam31_ui.py` cannot run as written and the 5070's tray
-measurements have no like-for-like counterpart here yet. Detailed timings are in
-[temp-devlog.md](temp-devlog.md).
+a stock photo translated across a synthetic frame. That PC had no `Media/`
+folder, so `tests/smoke_sam31_ui.py` could not run as written.
 
 ## 2026-09-22 — DARTF FAST webcam transport
 
@@ -512,7 +546,7 @@ input and produced an overlay with ID 1.
 This measures transport, not watch accuracy or identity continuity through
 motion and occlusion, which are still unevaluated.
 
-## 2026-09-15 - SAM 3.1 in picture, video and webcam testing
+## 2026-09-15 — SAM 3.1 in picture, video and webcam testing
 
 Added **SAM 3.1** and **SAM 3.1 (compiled)** to the picture, video-file and live
 webcam model menus. The existing launchers remain `run_sam_img.cmd` (port 7860)
@@ -608,7 +642,7 @@ accuracy claim is made.
 agree; fp32 remains selectable. SAM3 image + ByteTrack and this default fix were
 committed and pushed as `60fe315` on `sam3-image-bytetrack`.
 
-The six pen runs are recorded in [temp-devlog.md](temp-devlog.md). SAM3 fp16
+The six pen runs are in the 2026-09-10 entry below. SAM3 fp16
 reported 3.8 fps, image + ByteTrack 4.5 fps, Hybrid 21.6 fps and text YOLOE
 31.7 fps. These used different frames. Hit counts and distinct IDs do not prove
 that both pens kept their identities, so the final tracking choice remains open.
@@ -635,6 +669,95 @@ identity correctness through occlusion.
 clip with crossing, rotation and occlusion. Keep SAM3 fp16 as the default while
 these checks remain open. Quest transport and pixel-to-world projection still
 need implementation.
+
+## 2026-09-10 — Webcam backend comparison, one or two pens
+
+Six separate webcam runs with the prompt "pen", from the webcam tab's run log.
+They did not see the same frames:
+
+| # | Backend | fps | ms | Hits | IDs |
+|---|---|---|---|---|---|
+| 1 | SAM3 fp16 | 3.8 | 264 | 64/91 (70%) | 1 |
+| 2 | SAM3 image + ByteTrack | 4.5 | 224 | 111/132 (84%) | 18 |
+| 3 | SAM3 image + ByteTrack | 4.5 | 224 | 111/137 (81%) | 12 |
+| 4 | Hybrid (SAM3 seed → YOLOE) | 21.6 | 46 | 324/347 (93%) | 14 |
+| 5 | YOLOE (text prompt) | 31.7 | 32 | 185/270 (69%) | 0 |
+| 6 | SAM3 image + ByteTrack | 4.5 | 224 | 100/147 (68%) | 14 |
+
+- Hits count frames with at least one instance, and IDs count distinct IDs.
+  Neither shows whether both pens were found or kept their identities.
+- YOLOE's zero IDs: Ultralytics 8.4.138 defaults to TrackTrack, which starts IDs
+  above 0.7 confidence and needs three matched observations. Text detections are
+  accepted from 0.1, which can explain hits without IDs.
+- The Hybrid's 14 IDs mix SAM3 seed IDs with YOLOE IDs; nothing maps one to the
+  other at handoff.
+- The webcam default was set to `fp16 autocast, 1008px` and verified: the
+  preload, the dropdown and the file tab share one model.
+
+## 2026-09-09 — Why SAM3 looked like ~1 fps
+
+Two causes, neither a limit of the model:
+1. The webcam tab defaulted to fp32. fp16 autocast is about 2.3x faster; the
+   default was fixed on 2026-09-10.
+2. Cost is linear in the number of tracked objects, and the headline runs used
+   a plate of 13-14 meatballs.
+
+Fitted on live webcam frames (RTX 5070, after the memory-bank warm-up):
+
+```
+fp32:  513 ms fixed + 140 ms per tracked object
+fp16:  207 ms fixed +  70 ms per tracked object
+```
+
+So SAM3 video tracks one or two objects at 3.0-3.6 fps in fp16, with memory
+propagation intact. By hand on a pen: fp32 1.6 fps, fp16 3.4 fps.
+
+Forward-hook profile of one fp16 frame with 13 objects:
+
+| Submodule | Params | ms/frame | Share |
+|---|---|---|---|
+| `detector_model` | 840.4 M | 50.5 | 4.7% |
+| `tracker_model` | 11.7 M | 815.4 | 75.0% |
+| `tracker_neck` | 7.8 M | 4.8 | 0.4% |
+| Pre/post-processing | — | ~216 | 19.9% |
+
+The small tracker costs 16x the detector, because memory attention runs once
+per object while the backbone runs once per frame. `session.get_obj_num()`
+matched the returned instance count, so no hidden tracks inflate the cost.
+
+Left open: in two uncontrolled hand runs, fp32 hit on 71% of frames and fp16 on
+42%. Whether fp16 costs detection sensitivity was never checked.
+
+## 2026-09-09 — SAM3 image + ByteTrack, VRAM leaks and the DART review
+
+Branch `sam3-image-bytetrack`: SAM3's image detector on every frame, with
+Ultralytics' ByteTrack for IDs, prompted by DART's report of ~11 fps. Added to
+the webcam menu.
+- **Speed:** 234 ms per frame in fp16 (4.3 fps), against 1038 ms for SAM3 video
+  with 13 objects, on `meatballs_img.jpg` in a 640x480 frame.
+- **Tracking:** IDs come from box overlap, with no memory.
+  - A synthetic sweep on ~30 px meatballs kept IDs up to 16 px of movement per
+    frame and lost them at 32 px, about half an object width.
+  - Live with two pencils, IDs churned constantly, detection counts flickered,
+    and any normal-speed movement lost the track.
+  - **Re-detection plus overlap association does not work at 4 fps for
+    anything hand-held.**
+- **VRAM leaks made the webcam tab freeze after a few runs; fixed.**
+  - The SAM3 session was never released on Stop (~1350 MiB per run).
+  - The image model stayed resident after switching backends.
+  - Windows spills overflow to system RAM, so this looked like a freeze.
+  - `gc.collect()` is needed before `torch.cuda.empty_cache()`, because the
+    model's modules form reference cycles.
+- **DART review, corrected on 2026-09-10:** DART speeds up detection and uses
+  ByteTrack for IDs. DARTF also exports SAM3's memory tracker to TensorRT, which
+  the profile above makes worth testing; that led to the DARTF experiment.
+  Upstream's ~6 ms per object on an RTX 4090 is not a prediction for our GPUs.
+- Untried at the time: BoT-SORT with optical-flow camera-motion compensation,
+  retuning ByteTrack for 4 fps, and ReID, which cannot tell identical objects
+  apart.
+- The entry also argued that world anchoring might make image tracking
+  unnecessary for food on a counter. *Superseded:* the food is handled and
+  moves (SPECS), so it has to be tracked.
 
 ## 2026-09-09 — widget scaffold, and no on-device inference
 
@@ -691,5 +814,34 @@ of camera* — the test methods are inspector buttons now, via a small editor
 that reflects over `[ContextMenu]` — three spheres appear, dim
 at 1.5 s, vanish at 4 s.
 
-**Next:** decide the tracking approach (the four options); then the Quest ↔ PC
-transport and the pixel → world projection that fills `Detection`.
+**Next:** decide the tracking approach (the four options in the entry below); then
+the Quest ↔ PC transport and the pixel → world projection that fills `Detection`.
+
+## 2026-09-07 — First tracking findings (largely superseded)
+
+Built: SAM3 image and video testers (file and webcam tabs), the replay benchmark
+`bench_realtime.py`, and `yoloe_runner.py` with YOLOE text prompts and a
+SAM3-seeded YOLOE hybrid.
+
+Findings at the time:
+- SAM3's per-frame cost ramps over ~7-8 frames as its memory bank fills, so
+  short benchmarks measured the ramp. fp16 autocast is ~2.3x faster than fp32.
+- YOLOE text was weak on "meatball" (about 0.17 confidence). YOLOE with a visual
+  exemplar scored 0.9+ but lost the object on pose changes.
+- *Wrong or premature:* "~1 fps is SAM3's practical ceiling" came from fp32 on a
+  13-object plate (see 2026-09-09). "The hybrid only reproduces YOLOE's
+  ceiling" predates the pipeline fix below.
+
+**Pipeline fix.** YOLOE received RGB frames where it expects BGR, and the hybrid
+re-applied the seed boxes to each new frame without keeping the seed image. The
+hybrid now keeps the seed image, extracts visual embeddings once and reuses them.
+A synthetic check (`tests/smoke_hybrid.py`) seeded 13 instances and found 10 after
+translation.
+
+The four options considered:
+1. a periodic-refresh hybrid with a classical tracker between refreshes;
+2. adaptive multi-exemplar YOLOE, built on 2026-09-22 as re-grounding;
+3. accepting SAM3's rate;
+4. faster SAM3 builds, later tried as DARTF.
+
+The keyframe hybrid (2026-09-24) is the memory-based version of option 1.

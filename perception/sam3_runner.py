@@ -83,8 +83,8 @@ class Sam3Runner:
 class Sam3ImageTracker:
     """SAM3's image detector every frame + ByteTrack for the IDs.
 
-    Sam3VideoTracker's memory bank costs ~1s/frame; this drops it and re-detects
-    instead, associating frame to frame by IoU. Keeps SAM3's vocabulary (the reason
+    Sam3VideoTracker's memory tracker costs ~70 ms per tracked object (fp16); this
+    drops it and re-detects instead, associating frame to frame by IoU. Keeps SAM3's vocabulary (the reason
     YOLOE was unusable) and its masks, loses the temporal memory — so expect ID
     swaps between identical adjacent objects and a new ID after a full occlusion.
 

@@ -70,32 +70,23 @@ From the `perception/` folder:
    phrase ("meatball", "pot", "lemon"), choose **SAM3**, **SAM 3.1** or
    **SAM 3.1 (compiled)** and hit Submit. Toggle masks/boxes and adjust the
    threshold. SAM 3.1 requires its [Docker setup](sam31/README.md); compiled
-   first use can take several minutes.
+   mode pauses on the first image to compile (about 20 s with a warm cache,
+   minutes on a cold one).
 
 3. **Quit** — press `Ctrl+C` in the terminal. Closing the browser tab does
    not stop it.
 
-One-off runs from the command line instead (pays the ~10s model load each time):
+A one-off run from the command line instead (pays the ~10s model load each time):
 
 ```powershell
 .\.venv\Scripts\python.exe test_sam3.py photo.jpg "meatball"   # saves photo_sam3.png
-.\.venv\Scripts\python.exe sweep.py                            # all Test Data images
 ```
 
-## Video tracking
+## Video UI
 
-Tracks every instance of the concept through the clip, keeping stable IDs:
-
-```powershell
-.\.venv\Scripts\python.exe track_video.py "..\Test Data\AriaEverydayActivities_1.mp4" "mug"
-.\.venv\Scripts\python.exe track_video.py clip.mp4 "meatball" --max-frames 300 --stride 2
-```
-
-`--stride` samples every Nth frame (default 3) and `--max-frames` caps the clip
-(default 150) — decoded frames are held in RAM, so a full 1408x1408 video would
-otherwise need several GB. Writes `<video>_<prompt>.mp4` next to the source.
-
-Or use the UI (`run_sam_vid.cmd` from the repo root), which has two tabs:
+Run `run_sam_vid.cmd` from the repo root (port 7861). To replay a recorded clip
+through a backend from the command line, see
+[Recorded backend comparison](#recorded-backend-comparison). The UI has two tabs:
 
 - **Video file** — choose SAM3 offline propagation or SAM 3.1's forward-only
   tracker (normal or compiled). The results separate playback FPS from actual
@@ -160,24 +151,16 @@ restarting.
 
 Needs `timm` (in requirements). See the 2026-09-24 DEVLOG entries.
 
-`yoloe_runner.py` adds two alternatives to SAM3, evaluated after finding SAM3
-plateaus around 1 fps at steady state regardless of config (see below):
+`yoloe_runner.py` adds two faster alternatives to SAM3:
 
-The earlier quality comparisons were recorded before fixing swapped color
-channels in both YOLOE backends and incorrect visual references in Hybrid.
-Those observations need live retesting before drawing conclusions about the
-models' relative robustness.
-
-- **YOLOE (text prompt)** — Ultralytics' YOLOE, fast (~100-500ms/frame,
-  independent of internal resolution the way SAM3 is not). But its
-  open-vocabulary text encoder (a lightweight MobileCLIP model) is noticeably
-  weaker than SAM3's on specific food nouns: "meatball" tops out around 0.17
-  confidence even on the largest checkpoint (yoloe-11l-seg), vs. SAM3 finding
-  it cleanly. Don't take a single fixed-clip empty-scene benchmark's word for
-  a model's quality — this only showed up once tested against a real object.
+- **YOLOE (text prompt)** — Ultralytics' YOLOE, about 30 ms per frame live on
+  the 5070. Its open-vocabulary text encoder (a lightweight MobileCLIP model)
+  looked much weaker than SAM3's on specific food nouns: "meatball" topped out
+  around 0.17 confidence even on the largest checkpoint (yoloe-11l-seg). That
+  was measured before a 2026-09-07 color-channel fix and has not been retested.
 - **Hybrid (SAM3 seed -> YOLOE track)** and **Hybrid (SAM 3.1 seed -> YOLOE
-  track)** — a grounding model finds the prompt (slow, ~1s, but reliable on
-  niche nouns), then every instance it found seeds YOLOE's visual-exemplar
+  track)** — a grounding model finds the prompt (a few hundred ms per attempt,
+  but reliable on niche nouns), then every instance it found seeds YOLOE's visual-exemplar
   mode. The exact seed image is copied in BGR and supplied as `refer_image` at
   the first YOLOE step; the resulting embeddings are reused on later frames
   with `persist=True`. See the [YOLOE visual-prompt API](https://docs.ultralytics.com/models/yoloe/#visual-prompts)
@@ -310,8 +293,10 @@ empty-scene timing run — see caveat below):
 **Per-frame cost is not flat — this changes the earlier numbers above.**
 Timing ramps up over roughly the first 7-8 frames as the memory bank
 (`tracker_config.num_maskmem`, default 7) fills, then plateaus around **2x**
-the first frame's cost. Measured on fp16: ~530ms first frame -> **~1030ms
-steady state** (not the ~270-500ms a short burst suggests). All the earlier
+the first frame's cost. Measured on fp16 on a 13-meatball plate: ~530ms first
+frame -> **~1030ms steady state** (not the ~270-500ms a short burst suggests).
+Cost grows by about 70 ms per tracked object, so one or two objects run at
+about 275-300 ms (3-3.6 fps). All the earlier
 config numbers above were measured on short bursts that only partially
 crossed this ramp, so they understate real sustained cost — `--warmup`
 defaults to 10 now (was 3) and `--capture-seconds` to 15 (was 8) so a normal
@@ -322,12 +307,12 @@ tied to a learned positional-embedding weight shaped exactly `[7, 1, 1, 64]`
 — reducing it throws a checkpoint size-mismatch at load time, not usable.
 Two knobs that don't break correctness — `torch.backends.cudnn.benchmark`
 and capping `tracker_config.max_cond_frame_num` to 1 — only bought ~5%
-steady-state improvement combined (`fp16 ... tuned` in `CONFIGS`); most of
-the per-frame cost is the fixed-size vision backbone, which neither touches.
-There's no remaining config-level lever that meaningfully beats fp16/bf16
-autocast — further speedup likely means a different architecture (see the
-YOLOE section) or restructuring how often SAM3 actually needs to run rather
-than tuning its own knobs further.
+steady-state improvement combined (`fp16 ... tuned` in `CONFIGS`). On the
+13-object plate, the per-object memory tracker took about 75% of each frame
+and the detector about 5% (2026-09-09 profile in the DEVLOG), and neither knob
+touches the tracker. There's no remaining config-level lever that meaningfully
+beats fp16/bf16 autocast. That is why the hybrids keep SAM3's detector and
+replace its tracker.
 
 Caveat: any timing run where the prompt never matches anything only exercises
 the "no detection" code path, which is measurably cheaper and can hide bugs
@@ -336,7 +321,7 @@ will hit, and check the `hits` column, not just fps.
 
 The same configs are also selectable live in `video_ui.py`'s Webcam tab,
 which logs each run's fps/hit-rate so you can compare a few by eye against a
-real moving object (see below).
+real moving object (see [Video UI](#video-ui)).
 
 ## Layout
 
@@ -346,13 +331,15 @@ real moving object (see below).
 | `geometry.py` | Mask → centroid / diameter / area; pure numpy, unit-testable |
 | `viz.py` | Debug overlay rendering |
 | `test_sam3.py` | CLI smoke test wiring the above together |
-| `sweep.py` | Runs a set of prompts over `Test Data/`, saves overlays to `Test Data/results/` |
 | `ui.py` | Gradio tester — image + prompt + threshold, see the mask |
 | `video_runner.py` | Video tracking (`Sam3VideoModel`) — offline `track()` and live `track_frame()` |
-| `track_video.py` | CLI: track a concept through a video, write an annotated `.mp4` |
 | `video_ui.py` | Gradio video tracker — "Video file" and "Webcam (live)" tabs |
 | `bench_realtime.py` | Benchmarks precision/resolution/compile configs against one captured webcam clip |
-| `keyframe_hybrid.py` | SAM3 image mode on keyframes + EdgeTAM mask tracking between them; also replays a clip through any backend (`python keyframe_hybrid.py clip.mp4 pen --backend sam3video`) |
+| `keyframe_hybrid.py` | SAM3 or SAM 3.1 image mode on keyframes + EdgeTAM mask tracking between them; also replays a clip through any backend (`python keyframe_hybrid.py clip.mp4 pen --backend sam3video`) |
 | `yoloe_runner.py` | YOLOE text-prompt and seeded-hybrid trackers (SAM3 or SAM 3.1 seeder) — alternatives to `Sam3VideoTracker` in the webcam tab |
+| `sam31_runner.py`, `sam31/` | SAM 3.1 Docker worker, launcher and offline benchmark ([README](sam31/README.md)) |
+| `dartf_runner.py`, `dartf_worker.py`, `dartf/` | DARTF native and FAST Docker backends ([README](dartf/README.md)) |
+| `candidates/` | Offline comparison harness for EdgeTAM, SAM 2.1 tiny and EV-M ([README](candidates/README.md)) |
+| `tests/` | Model-free unit tests (`test_*.py`) and GPU smoke checks (`smoke_*.py`) |
 
 Work is logged in [DEVLOG.md](../DEVLOG.md); follow [PLAN.md](../PLAN.md) for next steps.

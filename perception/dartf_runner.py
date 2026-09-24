@@ -21,8 +21,8 @@ from video_runner import FrameResult
 
 class WorkerTracker:
     """Adapts a start_stream/track_frame worker into the frame generator the file
-    tab and track_video expect. Both Docker backends feed frames one at a time and
-    differ only in which session they open, so the loop is shared."""
+    tab expects. The Docker backends feed frames one at a time and differ only in
+    which session they open, so the loop is shared."""
 
     def track(self, frames, text):
         session = self.start_stream(text)
