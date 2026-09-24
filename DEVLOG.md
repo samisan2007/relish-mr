@@ -44,7 +44,7 @@ They show raw frames brightened for viewing, titled by source frame. Labels go i
 `perception/annotations/playdough-events.csv` (tracked; the format is in the
 evaluation doc).
 
-Git: this entry and the play-dough docs are committed on `experiment`, not pushed.
+Git: this entry and the play-dough docs are committed and pushed on `experiment` (`fa9db66`).
 Unity setting changes, `Media/` and `sept15-report.md` are left uncommitted.
 **Next:** the user annotates events (appears, hidden, visible, merge, split,
 touch) on the handling, return and pieces windows. Then
