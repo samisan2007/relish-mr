@@ -1,5 +1,10 @@
 # Real-time food tracking — findings, progress, options
 
+Historical experiment log. For current requirements use [SPECS.md](SPECS.md),
+for next steps use [PLAN.md](PLAN.md), and for newer work use [DEVLOG.md](DEVLOG.md).
+Older low-rate/static-food proposals and retry-every-frame behavior are superseded.
+YOLOE preserves IDs on ordinary frames; exemplar installation resets its tracker.
+
 ## RTX 3080 setup: SAM 3.1 and native DARTF FP16 — 2026-09-22
 
 Both backends the entry below could not start are now installed on this PC.

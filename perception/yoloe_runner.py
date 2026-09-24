@@ -10,8 +10,8 @@ shape as Sam3VideoTracker so the webcam UI can swap between them without special
 - HybridVideoTracker: uses a text-grounding model (SAM3 in-process, or SAM 3.1 in its
   Docker worker) to find every instance in a seed frame, then extracts YOLOE visual
   embeddings from that frame. Later frames reuse those embeddings with persist=True,
-  and the seeder is re-run whenever YOLOE has lost everything, plus optionally every
-  `reground_every` frames, so the exemplars follow the object through pose changes.
+  and the seeder is retried on loss with a timed cooldown, plus optionally every
+  `reground_every` frames while tracking.
 """
 
 import time
@@ -100,13 +100,16 @@ class HybridSession(dict):
 class HybridVideoTracker:
     """Ground the prompt with a slow, reliable text model (SAM3 or SAM 3.1), then track
     the resulting exemplars with YOLOE's persistent tracker.
-    Re-attempts grounding on every frame until something is found, then hands over to
-    YOLOE, re-grounding when the track is lost — frozen exemplars lose the object on
-    pose change — and on a fixed interval if `reground_every` is set.
+    Ground immediately at startup and after a transition to lost, then wait
+    retry_seconds after each attempt finishes before retrying while still lost.
+    Once seeded, YOLOE keeps searching between attempts with its old exemplars.
     """
 
     def __init__(self, seed_tracker, model_id: str = YOLOE_MODEL_ID, conf: float = 0.15,
-                 reground_every: int = 0, drift_scale: float = 8.0):
+                 reground_every: int = 0, drift_scale: float = 8.0,
+                 retry_seconds: float = 0.5):
+        if not 0 <= retry_seconds < float("inf"):
+            raise ValueError("retry_seconds must be finite and non-negative")
         from ultralytics import YOLOE
         from ultralytics.models.yolo.yoloe.predict import YOLOEVPSegPredictor
 
@@ -117,9 +120,10 @@ class HybridVideoTracker:
         # Periodic re-grounding, in frames; 0 disables it. Off by default because
         # installing fresh exemplars restarts YOLOE's track IDs — YOLOE.predict drops
         # self.predictor after set_classes, so the tracker is rebuilt (measured: ids
-        # [1] -> [2] across one re-ground). Losing every detection costs no IDs, so
-        # that trigger below always runs. Set this when drift matters more than IDs.
+        # [1] -> [2] across one re-ground). Ordinary YOLOE frames preserve IDs.
+        # Set this when drift matters more than preserving the tracker state.
         self.reground_every = reground_every
+        self.retry_seconds = retry_seconds
         # YOLOE matches the exemplar embedding, not the words, and a thin exemplar (a pen,
         # a watch strap) generalizes badly: observed locking onto a whole torso at 0.29,
         # over the 0.15 floor. Nothing else in the pipeline can tell that box is wrong, so
@@ -146,6 +150,7 @@ class HybridVideoTracker:
             since_ground=0,
             exemplar_area=0.0,
             lost=False,
+            next_ground_at=0.0,
             visual_prompts=None,
             reference_image=None,
         )
@@ -153,6 +158,8 @@ class HybridVideoTracker:
     def _ground(self, session, frame: np.ndarray) -> tuple[list[Instance], float]:
         """Run the seeder on this frame and, if it finds anything, stage new exemplars."""
         instances, ms = self.seed_tracker.track_frame(session["seed_session"], frame)
+        # Start the cooldown after inference, so a slow attempt cannot consume it.
+        session["next_ground_at"] = time.monotonic() + self.retry_seconds
         # Count the attempt, not the hit: a seeder that misses one scheduled frame while
         # YOLOE is still tracking fine must not then be called on every frame after it.
         session["since_ground"] = 0
@@ -179,15 +186,18 @@ class HybridVideoTracker:
 
     def track_frame(self, session, frame: np.ndarray) -> tuple[list[Instance], float]:
         if not session["seeded"]:
+            if time.monotonic() < session["next_ground_at"]:
+                return [], 0.0  # no exemplar yet; this frame did no model work
             instances, ms = self._ground(session, frame)
             session["seeded"] = bool(instances)
             return instances, ms
 
         seed_ms = 0.0
         session["since_ground"] += 1
-        # Re-ground on a schedule, and immediately once YOLOE has lost everything —
-        # waiting out the interval with nothing tracked is dead time.
-        if (self.reground_every and session["since_ground"] >= self.reground_every) or session["lost"]:
+        # While lost, the frame-based schedule must not bypass the cooldown.
+        if ((session["lost"] and time.monotonic() >= session["next_ground_at"])
+                or (not session["lost"] and self.reground_every
+                    and session["since_ground"] >= self.reground_every)):
             _, seed_ms = self._ground(session, frame)
 
         t0 = time.perf_counter()
@@ -213,7 +223,9 @@ class HybridVideoTracker:
         session["visual_prompts"] = None
         ms = (time.perf_counter() - t0) * 1000 + seed_ms
         instances = self._plausible(session, _to_instances(results[0], frame.shape[:2]))
-        # An emptied frame re-grounds on the next one, so drift corrects itself instead
-        # of persisting — that is the point of dropping the box rather than flagging it.
+        # A new loss gets one immediate attempt on the next request. Continuing
+        # absence respects the cooldown even if grounding found an unusable exemplar.
+        if not instances and not session["lost"]:
+            session["next_ground_at"] = 0.0
         session["lost"] = not instances
         return instances, ms

@@ -4,7 +4,7 @@
 # torch and torchvision are installed separately from the PyTorch CUDA index (see README),
 # not from this file, because the right wheel depends on the local CUDA driver version.
 
-transformers>=5.1  # SAM3 image and video APIs
+transformers==5.16.1  # private tracking APIs and EdgeTAM score-shape workaround
 accelerate
 huggingface_hub[cli]
 numpy
@@ -14,6 +14,6 @@ imageio
 imageio-ffmpeg
 gradio
 requests
-timm  # EdgeTAM's backbone (keyframe_hybrid.py)
-ultralytics  # YOLOE backend (yoloe_runner.py) — downloads its own weights + a ~570MB
+timm==1.0.30  # EdgeTAM's backbone (keyframe_hybrid.py)
+ultralytics==8.4.138  # tested YOLOE visual-prompt/tracker behavior; downloads weights + a ~570MB
              # MobileCLIP text encoder on first use, separate from the facebook/sam3 cache.

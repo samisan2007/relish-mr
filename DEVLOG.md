@@ -8,6 +8,130 @@ Detailed perception measurements and tracking experiments live in
 
 ---
 
+## 2026-09-24 — Ordered plan, lost-state cooldown and preserved replay results
+
+Added [PLAN.md](PLAN.md) with the next tasks and acceptance checks: establish a
+baseline, diagnose lost objects, validate live timing/recovery, profile before
+batching, then test handled food and connect the Quest. Alternative models get
+bounded offline comparisons before UI integration. No final backend is selected.
+
+**Documentation corrections:**
+- Added `AGENTS.md` and replaced obsolete remote-mentor/audio Copilot instructions.
+- Reconciled SPECS with moving food: capture-time pose does not remove food-motion
+  latency; hand overlap must not reject held food; the 8-10 fps target stays.
+- YOLOE tracks with persistent IDs on ordinary frames. Installing fresh exemplars
+  resets the tracker; failed grounding does not. Earlier descriptions of it as
+  not tracking, or resetting IDs every frame, were too broad.
+- EdgeTAM caches shared image features; its per-object tracking work is sequential.
+  Batching might improve utilization but does not remove that work or guarantee
+  flat cost. Lost-pen causes are still hypotheses requiring labeled replay.
+- Corrected FAST's webcam/3080 status, historical compilation context and devlog
+  links. Historical measurements below are retained, not new benchmark results.
+
+**Small implementation fixes:**
+- Both YOLOE hybrids ground immediately at startup and once on the request after
+  a new loss. Continuing absence waits 500 ms after the last attempt finishes.
+  YOLOE keeps searching with the old exemplar between retries. Before the first
+  seed, skipped requests show a waiting message and do not inflate inference FPS.
+  The existing periodic refresh slider still applies while tracking. The delay
+  is provisional; `retry_seconds=0` enables the old policy for comparison.
+- Keyframe replay saves every run in a fresh UTC timestamp directory with a
+  manifest (settings, clip/source hashes, host package/GPU details and Git state
+  when available). It saves mean/p50/p95 request times, total processing time and
+  completion/failure state; partial CSV data survives an exception or interrupt.
+  Camera, writer and session cleanup runs on those paths too. Invalid inputs and
+  zero-frame videos fail explicitly. This does not archive checkpoints or dirty code.
+- Pinned Transformers 5.16.1, Ultralytics 8.4.138 and timm 1.0.30 to the locally
+  installed versions behind our tracking APIs. No dependency install was needed.
+
+**Validation:** 57 unit tests pass, including timed initial retries, repeated
+loss, recovery with old exemplars, cooldown after slow grounding, UI waiting-state
+statistics, unique run output and cleanup/partial CSV on failure and interruption.
+The run also emitted asyncio unclosed-event-loop ResourceWarnings during UI tests;
+these did not fail the suite and remain uninvestigated. No new GPU inference,
+food-quality or performance claim is made. Existing uncommitted SAM 3.1 work was
+preserved; batching, asynchronous grounding and association changes are not included.
+
+**Next:** replay and annotate the lost-pen windows, then change one cause at a time.
+
+## 2026-09-24 — Handled food is the requirement, compiled SAM 3.1 fixed, SAM 3.1 keyframes
+
+**SPECS now states that the food moves.** Cooks knead meatballs, shape them and
+hold them up to compare. The food changes shape and is hidden by the hands, so
+perception has to track and measure it through that.
+- World anchoring, low-rate detection and following the hand joints are
+  complements, not replacements.
+- Items 1, 4, 5 and 11 and the acceptance target were corrected to match. They
+  had treated still food as the main case.
+
+**Compiled SAM 3.1 froze on the webcam. It is fixed by compiling only the detector.**
+- **Cause:** upstream also compiles tracker and matching functions for fixed
+  sizes, which change with the number of objects and memory frames.
+  - A headless empty-scene run looked fine: frame 1 compiled in 62 s, then
+    360 ms per frame. With no objects, the tracker never runs.
+  - With three pens coming into view, frames 1-4 took 21, 16, 86 and 32 s, and
+    every later change in the count recompiled again.
+- **Fix:** `compile_detector` in [worker.py](perception/sam31/worker.py) runs
+  upstream's compile and then puts the five tracker and matching functions back
+  to uncompiled.
+- **Result** on 200 clip frames with 0-2 pens: frame 1 compiles for 18 s, then
+  412 ms mean and 440 ms max, with no stalls.
+  - The full compile ran at 424 ms and uncompiled at 500 ms on the same frames,
+    so nothing was lost.
+  - These timings are with the compile cache already built; a cold cache takes
+    longer.
+
+**New: keyframe hybrid with SAM 3.1 keyframes, uncompiled or compiled.**
+- Two webcam menu entries and the replay backends `hybrid31` and `hybrid31c`.
+- The Docker worker starts with the stream, and Stop can cancel it.
+- The worker's image-only mode now treats every request as an independent
+  picture. Before, a second request would have gone through the video tracker.
+- Replay of clip 2, compiled: 9.6 fps and 19 IDs. Keyframes take 368 ms,
+  against about 230 ms for SAM3 image. Frames between keyframes take 77 ms.
+  - Output appeared on 814 of 1234 frames. The SAM3 keyframe run on the same
+    code was interrupted, so the two can't be compared on coverage yet.
+  - The thresholds (0.4 and 0.2) were tuned on SAM3's scores and have not been
+    retuned for SAM 3.1.
+
+**Webcam round-up (user, approximate):**
+
+| Backend | fps | Notes |
+|---|---|---|
+| SAM3 video | ~3 | 1-2 pens |
+| SAM3 image + ByteTrack | 4.5 | 2-3 pens |
+| Keyframe hybrid, SAM3 | ~12 | Loses the pen when it moves |
+| Keyframe hybrid, SAM 3.1 | 8-9 with 3 pens, 33 empty | |
+| Keyframe hybrid, SAM 3.1 compiled | Same as uncompiled | |
+| YOLOE text | 33 | |
+| Hybrid, SAM 3.1 seed → YOLOE | 33 tracking, 11 lost | |
+| DARTF | 5 | |
+
+**What this means:**
+- **Only the keyframe hybrids and the YOLOE backends reach the 8-10 fps target.**
+  The YOLOE backends re-detect each frame rather than track, and restart their
+  IDs.
+- **Compiling makes no difference to the SAM 3.1 keyframe hybrid.** A keyframe
+  is 1 frame in 10, so saving ~90 ms on it is ~9 ms per frame. EdgeTAM's
+  per-object cost between keyframes dominates.
+- **SAM 3.1 keyframes are slower than SAM3's.** Each goes through Docker and
+  sets up fresh state. So the SAM 3.1 hybrid runs at 8-9 fps against 12.
+- **Open: the keyframe hybrid loses a moving pen.** Two causes are possible:
+  - EdgeTAM drops a fast-moving pen, and only the next keyframe, up to 10
+    frames later, can recover it;
+  - or SAM3 misses the motion-blurred pen at a keyframe, and the new
+    `retire_after=1` hides it until a keyframe sees it again.
+  - A replay can separate the two.
+
+**Validation:** all 52 unit tests pass. Compiled SAM 3.1 was probed headless on
+the clips and then on the webcam, where compiled and uncompiled ran at the same
+speed.
+
+**Next:**
+- Diagnose why a moving pen is lost, and fix it. A likely fix is running an
+  early keyframe as soon as a shown track disappears.
+- Cut EdgeTAM's per-object cost, or run keyframes off the main loop. Both are
+  needed for plates with many pieces.
+
 ## 2026-09-24 — Keyframe hybrid live: double IDs, merged pens and ghost tracks
 
 The first webcam run of the keyframe hybrid showed three tracking failures. All

@@ -18,18 +18,27 @@ existing SAM3 backends, for a like-for-like comparison):
     python keyframe_hybrid.py ../../Media/pen_test_vid.mp4 pen
     python keyframe_hybrid.py ../../Media/pen_test_vid.mp4 pen --backend sam3video
 
-Writes an annotated video, a per-frame ID CSV and an ID-timeline PNG to runs/.
+Writes video, ID CSV, timeline and run metadata to a fresh directory under runs/.
 """
 
 import argparse
 import csv
+import hashlib
+import json
+import subprocess
+import sys
+from contextlib import ExitStack
+from datetime import datetime, timezone
+from importlib.metadata import version
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
 
+from dartf_runner import track_worker_frame
 from sam3_runner import Instance, Sam3Runner
+from sam31_runner import Sam31Runner, Sam31Session
 
 EDGETAM_ID = "yonigozlan/EdgeTAM-hf"
 
@@ -44,10 +53,13 @@ COMPACT_AFTER = 4
 
 class _Stream(dict):
     """Per-stream state. A dict for the UI's run log, plus reset_inference_session()
-    so the webcam tab's Stop cleanup releases the EdgeTAM memory as for SAM3."""
+    so the webcam tab's Stop cleanup releases the EdgeTAM memory as for SAM3, and
+    closes a SAM 3.1 detector's Docker worker."""
 
     def reset_inference_session(self):
         self["edgetam"].reset_inference_session()
+        if self["detector"] is not None:
+            self["detector"].reset_inference_session()
 
 
 def mask_overlap(a: np.ndarray, b: np.ndarray) -> float:
@@ -128,7 +140,7 @@ def _box(mask: np.ndarray) -> tuple[float, float, float, float]:
 class KeyframeHybridTracker:
     def __init__(
         self,
-        sam3: Sam3Runner,
+        sam3: Sam3Runner | Sam31Runner,
         keyframe_every: int = 10,
         threshold: float = 0.4,
         match_iou: float = 0.3,
@@ -136,7 +148,9 @@ class KeyframeHybridTracker:
         keep_threshold: float = 0.2,
         fp16: bool = True,
     ):
-        """keyframe_every: run SAM3 on every Nth frame (10 at 25 fps is 2.5 Hz).
+        """sam3: the keyframe detector. A Sam31Runner runs SAM 3.1 image mode in its
+        Docker worker, one per stream; the thresholds were tuned on SAM3's scores.
+        keyframe_every: run SAM3 on every Nth frame (10 at 25 fps is 2.5 Hz).
         threshold: SAM3 detection score floor for seeding or creating a track.
         match_iou: minimum overlap (over the smaller mask) between a detection and a track.
         retire_after: consecutive keyframes a track may go unconfirmed by SAM3.
@@ -171,11 +185,16 @@ class KeyframeHybridTracker:
             enabled=self.autocast_dtype is not None,
         )
 
-    def start_stream(self, text: str) -> "_Stream":
-        """Fresh EdgeTAM session per stream; IDs restart at 1."""
+    def start_stream(self, text: str, on_started=None) -> "_Stream":
+        """Fresh EdgeTAM session per stream; IDs restart at 1. A SAM 3.1 detector
+        boots its worker here; on_started lets Stop cancel that boot, as for SAM 3.1."""
+        detector = None
+        if isinstance(self.sam3, Sam31Runner):
+            detector = Sam31Session(text, self.sam3.compile_model, image_only=True,
+                                    threshold=self.keep_threshold, on_started=on_started)
         session = self.processor.init_video_session(
             inference_device=self.model.device, video_storage_device="cpu")
-        return _Stream(prompt=text, edgetam=session, frame_idx=0, next_id=1,
+        return _Stream(prompt=text, edgetam=session, detector=detector, frame_idx=0, next_id=1,
                        last_masks={}, misses={}, retired=set(), last_keyframe_ms=0.0)
 
     def track_frame(self, s: dict, frame: np.ndarray) -> tuple[list[Instance], float]:
@@ -193,8 +212,12 @@ class KeyframeHybridTracker:
         inputs = self.processor(images=frame, device=self.model.device, return_tensors="pt")
 
         if i % self.keyframe_every == 0:
-            with self._autocast():
-                dets = self.sam3.segment(Image.fromarray(frame), s["prompt"], self.keep_threshold).instances
+            if s["detector"] is not None:
+                dets, _ = track_worker_frame(s["detector"], frame)
+                dets = [d for d in dets if d.score >= self.keep_threshold]
+            else:
+                with self._autocast():
+                    dets = self.sam3.segment(Image.fromarray(frame), s["prompt"], self.keep_threshold).instances
             dets = [dets[k] for k in dedupe([d.mask for d in dets], [d.score for d in dets], 0.6)]
             # Match against every mask EdgeTAM still follows, retired ones included:
             # SAM3 misses thin objects on many frames, so a retirement is often wrong,
@@ -294,9 +317,43 @@ class KeyframeHybridTracker:
 
 # --- replay CLI ---------------------------------------------------------------
 
+def _create_run(args):
+    """Keep each experiment identifiable; never overwrite a prior run."""
+    video = Path(args.video).resolve()
+    created = datetime.now(timezone.utc)
+    run_dir = Path(args.out) / created.strftime("%Y%m%d-%H%M%S-%f")
+    run_dir.mkdir(parents=True, exist_ok=False)
+    with video.open("rb") as f:
+        clip_hash = hashlib.file_digest(f, "sha256").hexdigest()
+    root = Path(__file__).resolve().parent
+    metadata = {
+        "created_utc": created.isoformat(), "settings": vars(args).copy(),
+        "video": str(video), "video_sha256": clip_hash,
+        "python": sys.version, "cuda": torch.version.cuda,
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+        "packages": {name: version(name) for name in
+                     ("torch", "transformers", "ultralytics", "timm", "numpy")},
+        "source_sha256": {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+                          for p in [*root.glob("*.py"), root / "sam31" / "worker.py"]},
+        "timing": "Sequential replay; frame requests exclude decode, drawing, encoding and startup; not live latency.",
+        "status": "running",
+    }
+    try:
+        metadata["git_commit"] = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True, stderr=subprocess.PIPE).strip()
+        metadata["git_status"] = subprocess.check_output(
+            ["git", "-C", str(root), "status", "--porcelain"], text=True, stderr=subprocess.PIPE).rstrip("\r\n")
+    except (OSError, subprocess.CalledProcessError) as error:
+        metadata["git_error"] = str(error)
+    (run_dir / "environment.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return run_dir, metadata
+
+
 def _load_backend(name: str, args):
-    if name == "hybrid":
-        sam3 = Sam3Runner(dtype=torch.float16)
+    if name.startswith("hybrid"):
+        sam3 = {"hybrid": lambda: Sam3Runner(dtype=torch.float16),
+                "hybrid31": Sam31Runner,
+                "hybrid31c": lambda: Sam31Runner(compile_model=True)}[name]()
         return KeyframeHybridTracker(sam3, args.keyframe_every, args.threshold,
                                      args.match_iou, args.retire_after, args.keep_threshold,
                                      fp16=not args.fp32)
@@ -338,7 +395,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Replay a clip through a tracking backend")
     p.add_argument("video")
     p.add_argument("prompt")
-    p.add_argument("--backend", default="hybrid", choices=["hybrid", "sam3video", "sam3image"])
+    p.add_argument("--backend", default="hybrid",
+                   choices=["hybrid", "hybrid31", "hybrid31c", "sam3video", "sam3image"],
+                   help="hybrid31/hybrid31c: SAM 3.1 keyframes (eager/compiled) from its Docker worker")
     p.add_argument("--keyframe-every", type=int, default=10)
     p.add_argument("--threshold", type=float, default=0.4)
     p.add_argument("--match-iou", type=float, default=0.3)
@@ -349,52 +408,91 @@ def main() -> None:
     p.add_argument("--max-frames", type=int, default=0, help="0 = whole clip")
     p.add_argument("--out", default="runs")
     args = p.parse_args()
+    if not Path(args.video).is_file() or not args.prompt.strip():
+        p.error("Provide an existing video and a non-empty prompt")
+    if args.keyframe_every < 1 or args.retire_after < 1 or args.max_frames < 0:
+        p.error("Require keyframe-every >= 1, retire-after >= 1 and max-frames >= 0")
+    if not all(0 <= value <= 1 for value in (args.keep_threshold, args.threshold, args.match_iou)):
+        p.error("Thresholds and match-iou must be between 0 and 1")
+    if args.backend.startswith("hybrid") and args.keep_threshold > args.threshold:
+        p.error("Hybrid keep-threshold must not exceed threshold")
 
     video = Path(args.video)
-    tag = args.backend if args.backend != "hybrid" else f"hybrid_k{args.keyframe_every}"
-    out_dir = Path(args.out)
-    out_dir.mkdir(exist_ok=True)
+    hybrid = args.backend.startswith("hybrid")
+    tag = f"{args.backend}_k{args.keyframe_every}" if hybrid else args.backend
+    out_dir, metadata = _create_run(args)
     stem = out_dir / f"{video.stem}_{tag}"
 
-    tracker = _load_backend(args.backend, args)
-    session = tracker.start_stream(args.prompt)
-    cap = cv2.VideoCapture(str(video))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    writer = open_writer(f"{stem}.mp4", fps)
-
+    print(f"Results: {out_dir}", flush=True)
     ids_per_frame, ms, key_ms = [], [], []
-    with open(f"{stem}.csv", "w", newline="") as f:
-        log = csv.writer(f)
-        log.writerow(["frame", "ms", "ids"])
-        n = 0
-        while not args.max_frames or n < args.max_frames:
-            ok, bgr = cap.read()
-            if not ok:
-                break
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            instances, t = tracker.track_frame(session, rgb)
-            ids = sorted(i.obj_id for i in instances if i.obj_id is not None)
-            ids_per_frame.append(ids)
-            ms.append(t)
-            if args.backend == "hybrid" and n % args.keyframe_every == 0:
-                key_ms.append(session["last_keyframe_ms"])
-            log.writerow([n, f"{t:.1f}", " ".join(map(str, ids))])
-            writer.append_data(np.asarray(draw_instances(Image.fromarray(rgb), instances)))
-            if n % 50 == 0:
-                print(f"frame {n:5d}  {t:6.1f} ms  ids={ids}")
-            n += 1
-    writer.close()
+    n = 0
+    started = time.perf_counter()
+    try:
+        with ExitStack() as cleanup:
+            cap = cv2.VideoCapture(str(video))
+            cleanup.callback(cap.release)
+            if not cap.isOpened():
+                raise ValueError(f"Cannot open video: {video}")
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            metadata["source_fps"] = fps
+            tracker = _load_backend(args.backend, args)
+            session = tracker.start_stream(args.prompt)
+            if hasattr(session, "reset_inference_session"):
+                cleanup.callback(session.reset_inference_session)
+            writer = open_writer(f"{stem}.mp4", fps)
+            cleanup.callback(writer.close)
+            f = cleanup.enter_context(open(f"{stem}.csv", "w", newline=""))
+            log = csv.writer(f)
+            log.writerow(["frame", "ms", "ids"])
+            while not args.max_frames or n < args.max_frames:
+                ok, bgr = cap.read()
+                if not ok:
+                    break
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                instances, t = tracker.track_frame(session, rgb)
+                ids = sorted(i.obj_id for i in instances if i.obj_id is not None)
+                ids_per_frame.append(ids)
+                ms.append(t)
+                if hybrid and n % args.keyframe_every == 0:
+                    key_ms.append(session["last_keyframe_ms"])
+                log.writerow([n, f"{t:.1f}", " ".join(map(str, ids))])
+                f.flush()  # preserve completed requests if the next one stalls
+                n += 1
+                writer.append_data(np.asarray(draw_instances(Image.fromarray(rgb), instances)))
+                if (n - 1) % 50 == 0:
+                    print(f"frame {n - 1:5d}  {t:6.1f} ms  ids={ids}")
+            if not n:
+                raise ValueError("Video contained no decodable frames")
+        metadata["status"] = "completed"
+    except BaseException as error:
+        metadata.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
+                        error=f"{type(error).__name__}: {error}")
+        raise
+    finally:
+        metadata.update(frames=n, total_seconds=time.perf_counter() - started)
+        metadata["total_timing"] = "Includes model/session startup, decoding, drawing, encoding and cleanup; excludes manifest and timeline."
+        if ms:
+            measured = ms[10:] or ms
+            metadata["requests"] = {
+                "warmup_frames_excluded": 10 if len(ms) > 10 else 0,
+                "mean_ms": float(np.mean(measured)),
+                "p50_ms": float(np.median(measured)),
+                "p95_ms": float(np.percentile(measured, 95)),
+            }
+        (out_dir / "environment.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     _timeline_png(ids_per_frame, Path(f"{stem}_ids.png"))
 
     steady = ms[10:] or ms
     distinct = sorted({i for ids in ids_per_frame for i in ids})
     hit = sum(1 for ids in ids_per_frame if ids)
     print(f"\n{args.backend}: {n} frames, median {np.median(steady):.1f} ms "
-          f"({1000 / np.mean(steady):.1f} fps mean throughput)")
+          f"({1000 / np.mean(steady):.1f} frame requests/sec; p95 {np.percentile(steady, 95):.1f} ms)")
     if key_ms:
         gap = [t for k, t in enumerate(ms) if k % args.keyframe_every][10:]
-        print(f"  keyframes: median {np.median(key_ms[1:] or key_ms):.0f} ms (SAM3 + seeding); "
-              f"gap frames: median {np.median(gap):.1f} ms")
+        print(f"  keyframes: median {np.median(key_ms[1:] or key_ms):.0f} ms (SAM3 + seeding)")
+        if gap:
+            print(f"  gap frames: median {np.median(gap):.1f} ms")
+    print(f"  total processing: {metadata['total_seconds']:.1f}s ({n / metadata['total_seconds']:.2f} fps)")
     print(f"  frames with output: {hit}/{n}; distinct IDs: {len(distinct)} {distinct}")
     print(f"  wrote {stem}.mp4, {stem}.csv, {stem}_ids.png")
 

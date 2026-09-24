@@ -1,4 +1,7 @@
-# Perception — Batch 1: SAM 3 local test
+# Perception — setup and experiments
+
+Current direction and acceptance checks: [PLAN.md](../PLAN.md).
+Requirements: [SPECS.md](../SPECS.md). Results: [DEVLOG.md](../DEVLOG.md).
 
 Tested on Windows with Python 3.12 and an NVIDIA RTX 5070. The webcam tools use
 OpenCV's Windows DirectShow backend.
@@ -36,6 +39,10 @@ Install Python 3.12 first if `py -3.12 --version` cannot find it.
 
    On an NVIDIA machine, the last command should report `CUDA available: True`.
    A CPU-only installation can run inference, but will be much slower.
+
+   Transformers, Ultralytics and timm are pinned to the installed versions used
+   by our private tracking APIs and EdgeTAM workaround. Upgrade deliberately with
+   regression and real-model checks; the remaining dependencies are not locked.
 
 4. Request access to the gated model at https://huggingface.co/facebook/sam3
    (instant-ish approval after accepting the license).
@@ -96,7 +103,7 @@ Or use the UI (`run_sam_vid.cmd` from the repo root), which has two tabs:
   Defaults to **SAM3 / fp16 autocast, 1008px**, loading on first selection.
   The video-file tab and Hybrid's SAM3 seed share that fp16 model;
   fp32 remains selectable for webcam comparisons.
-  Stop logs that run's fps/ms/hit-rate into a rolling log of the last 8 runs,
+  Stop logs frame-request fps/ms/hit-rate into a rolling log of the last 8 runs,
   so you can flip backends/configs and compare by eye against a real moving
   object instead of only trusting fixed-clip numbers. Switching model/config
   takes effect on the next Start and reloads (~5-10s SAM3, longer for YOLOE's
@@ -140,8 +147,13 @@ restarting.
 - Tracks that land on the same object are reduced to one.
 - A track that SAM3 gives no support at a keyframe is hidden. Detections from 0.2
   count as support; only detections of 0.4 or more start or re-seed a track.
-- Speed falls with each tracked object, because EdgeTAM runs one pass per track
-  per frame. With nothing tracked, it is skipped.
+- Speed falls with each tracked object: shared image features are cached, but
+  object-specific memory/decoder work runs sequentially. With no tracks it is skipped.
+  The interval counts processed frames: every 10 at 10 fps is about 1 Hz, not 2-3 Hz.
+- **SAM 3.1 variants:** the keyframes can come from SAM 3.1's image mode instead,
+  uncompiled or compiled. It runs in its Docker worker, one per Start, and each
+  keyframe is an independent picture. Replay one with
+  `python keyframe_hybrid.py clip.mp4 pen --backend hybrid31c`.
 
 Needs `timm` (in requirements). See the 2026-09-24 DEVLOG entries.
 
@@ -171,12 +183,22 @@ models' relative robustness.
   fp16 model, the SAM 3.1 one keeps a Docker worker open for the stream so a
   re-ground costs one inference rather than a container boot.
 
-  Both re-ground when YOLOE returns nothing, and optionally every N frames via
-  the webcam tab's re-ground slider. The schedule is off by default because
+  Both ground immediately at startup and on the request after a new loss. If
+  still lost, attempts wait 500 ms after the previous attempt finishes. YOLOE
+  keeps searching with existing exemplars between attempts; before the first
+  seed there is no YOLOE search. Cooldown-only frames are excluded from the UI's
+  inference statistics. `HybridVideoTracker(..., retry_seconds=0)` restores the
+  old retry-every-request behavior for comparison; 0.5 is a provisional default.
+
+  While tracking, the webcam re-ground slider optionally refreshes every N frames.
+  It is off by default because
   installing fresh exemplars rebuilds YOLOE's tracker and **restarts the track
   IDs**. On an RTX 3080 at 640x480 a quiet YOLOE frame is ~35ms against ~750ms
   for a SAM 3.1 re-ground, so the interval sets the average rate: ~28 fps at 0
   (lost only), ~21 fps at 60, ~9 fps at 10 (the last measured directly).
+  These are historical tracking-phase numbers, not measurements of the new
+  lost-state policy. Ordinary frames use persistent IDs; failed grounding does
+  not install exemplars or reset the tracker.
 
   YOLOE matches the exemplar embedding, not the words, so a thin exemplar (a
   pen, a watch strap) generalizes badly — observed locking onto a whole torso
@@ -213,7 +235,38 @@ coordinates, checks that visual embeddings are extracted once per stream,
 renders overlays in memory, and checks a restart with a new reference. It
 does not measure sustained speed or validate live rotation and occlusion.
 
-## Real-time benchmark
+## Recorded backend comparison
+
+From `perception/`, use the same input for each backend:
+
+```powershell
+.\.venv\Scripts\python.exe keyframe_hybrid.py ..\..\Media\pen_test_vid.mp4 pen --backend hybrid
+```
+
+Backends: `hybrid`, `hybrid31`, `hybrid31c`, `sam3video`, `sam3image`.
+Each run creates a fresh UTC timestamp directory under `runs/` (or `--out`).
+It saves an annotated MP4, per-frame CSV, an ID timeline when IDs exist, and
+`environment.json`: settings, clip and source hashes, host versions/GPU, Git state
+when available, completion/failure state, frame count and request p50/p95/mean.
+Partial CSV data is flushed; errors and interrupts release the worker and video
+resources. A forcibly killed process can leave the manifest marked `running`.
+
+Request timings exclude decode, drawing, encoding and startup. Total processing
+includes those costs and cleanup; it excludes manifest setup and timeline drawing.
+Warm request statistics exclude ten frames when the clip is long enough; short
+runs include startup requests and are not steady-state benchmarks. Playback FPS
+comes from the source clip. None of these is capture-to-display latency.
+
+Commit/review dirty changes before a baseline: hashes identify code but do not
+archive it. Checkpoint revisions and worker package versions still need separate
+recording for model comparisons. Inspect masks and physical identities; output
+coverage and ID counts alone do not establish quality. See [PLAN.md](../PLAN.md).
+
+## Historical SAM3 configuration benchmark
+
+The findings below describe the original Windows SAM3 path. Linux SAM 3.1 now
+supports detector-only compilation; the historical Windows limitation is not a
+claim that compilation is unavailable for all backends.
 
 `bench_realtime.py` captures one webcam clip, then replays those exact frames
 through several `Sam3VideoTracker` configs (precision, dispatch mode, internal
@@ -299,4 +352,4 @@ real moving object (see below).
 | `keyframe_hybrid.py` | SAM3 image mode on keyframes + EdgeTAM mask tracking between them; also replays a clip through any backend (`python keyframe_hybrid.py clip.mp4 pen --backend sam3video`) |
 | `yoloe_runner.py` | YOLOE text-prompt and seeded-hybrid trackers (SAM3 or SAM 3.1 seeder) — alternatives to `Sam3VideoTracker` in the webcam tab |
 
-Work is logged in `../Documentation/devlog.md`.
+Work is logged in [DEVLOG.md](../DEVLOG.md); follow [PLAN.md](../PLAN.md) for next steps.

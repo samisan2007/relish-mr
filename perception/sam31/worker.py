@@ -48,6 +48,27 @@ def prune_memory(state, frame_idx, history=32):
                         del inputs[idx]
 
 
+def compile_detector(model):
+    """Compile only the detector, whose shapes the fixed 1008 px input pins down.
+    Upstream's _compile_model also compiles tracker and matching functions for
+    static shapes that change with the number of objects and memory frames, so
+    live each new count recompiled: 21, 16, 86 and 32 s stalls as three pens came
+    into view, and again whenever the count changed. That looked like a frozen
+    stream, for ~15% over eager once settled."""
+    if getattr(model, "_model_is_compiled", False) or not model.compile_model:
+        return
+    import sam3.model.sam3_video_base as video_base
+
+    tracker = model.tracker
+    eager = (tracker.maskmem_backbone.forward, tracker.transformer.encoder.forward,
+             tracker.sam_mask_decoder.forward, tracker._suppress_object_pw_area_shrinkage,
+             video_base._associate_det_trk_compilable)
+    model._compile_model()
+    (tracker.maskmem_backbone.forward, tracker.transformer.encoder.forward,
+     tracker.sam_mask_decoder.forward, tracker._suppress_object_pw_area_shrinkage,
+     video_base._associate_det_trk_compilable) = eager
+
+
 class Sam31LiveTracker:
     def __init__(self, prompt, compile_model=False, image_only=False, threshold=0.5):
         import torch
@@ -84,6 +105,10 @@ class Sam31LiveTracker:
 
         if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3 or not all(frame.shape[:2]):
             raise ValueError("SAM 3.1 frame must be a non-empty uint8 RGB HxWx3 array")
+        if self.image_only:
+            # Every request is an independent picture (the keyframe hybrid's detector);
+            # later frames would otherwise run the video tracker on this state.
+            self.state, self.frame_idx = None, 0
         if self.state is not None and frame.shape[:2] != (self.state["orig_height"], self.state["orig_width"]):
             raise ValueError("Frame dimensions changed; stop and restart tracking")
         t0 = time.perf_counter()
@@ -95,7 +120,7 @@ class Sam31LiveTracker:
                 images = self.state["input_batch"].img_batch
                 images.tensors = [images.tensors[0]]
                 if self.image_only:
-                    model._compile_model()
+                    compile_detector(model)
                 _, output = model.add_prompt(self.state, frame_idx=0, text_str=self.prompt)
             else:
                 state = self.state
@@ -115,7 +140,7 @@ class Sam31LiveTracker:
                 for tracker_state in state["sam2_inference_states"]:
                     tracker_state["num_frames"] = idx + 1
                 # Only the current frame exists: detector prefetch cannot read a future frame.
-                model._compile_model()
+                compile_detector(model)
                 out = model._run_single_frame_inference(state, idx, reverse=False)
                 output = model._postprocess_output(
                     state, out, removed_obj_ids=out["removed_obj_ids"],

@@ -42,9 +42,23 @@ containers, and run one GPU test at a time. From the repository root:
 | Webcam | `run_sam_vid.cmd` (port 7861) | In **Webcam (live)**, select **SAM 3.1**, enter a noun, use camera index 0 and Start. Stop records the run and releases the camera/worker. |
 
 Each mode also offers **SAM 3.1 (compiled)**. Start with normal mode for quick
-checks. Compiled first frames can take several minutes; webcam Stop can cancel
-model loading or compilation. Frame 0 runs eagerly and returns quickly, so the
-compile wait lands on the second frame, not the first. A fresh worker loads for every picture/file/Start,
+checks. Webcam Stop can cancel model loading or compilation.
+- **Only the detector is compiled** (`compile_detector` in `worker.py`). Its
+  shapes are fixed by the 1008 px input.
+- **Upstream also compiles tracker and matching functions for fixed sizes.**
+  Those sizes change with the number of objects and memory frames. Live, every
+  new count recompiled, with stalls of 21, 16, 86 and 32 s as three pens came
+  into view, and more whenever the count changed. That looked like a frozen
+  stream.
+- **Timing, on the 5070 with the cache already built:**
+  - Detector-only compile: frame 1 compiles for about 20 s. It then held
+    412 ms per frame over 200 frames with 0-2 pens, with no stalls.
+  - Full upstream compile: 424 ms per frame once settled.
+  - Uncompiled: 500 ms per frame.
+- A cold compile cache takes longer. Frame 0 runs uncompiled and returns
+  quickly, so the wait lands on frame 1 (on frame 0 in picture mode).
+
+A fresh worker loads for every picture/file/Start,
 so model startup is paid again; downloaded weights and compiled kernels are
 cached. SAM3 remains the default and loads only when selected. Selecting SAM 3.1
 releases other model caches in that UI process to leave room on the 12 GB GPU.

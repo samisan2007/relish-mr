@@ -4,10 +4,19 @@ Run from perception/: .venv/Scripts/python.exe -m unittest discover -s tests -v
 """
 
 import unittest
+import argparse
+import csv
+import hashlib
+import io
+import json
+import tempfile
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import numpy as np
 
-from keyframe_hybrid import dedupe, mask_iou, match_masks
+from keyframe_hybrid import _create_run, dedupe, main, mask_iou, match_masks
 
 
 def _rect(x1, y1, x2, y2):
@@ -63,6 +72,63 @@ class MatchMasksTests(unittest.TestCase):
         masks = [near, pen, other, _rect(10, 10, 20, 20), _rect(10, 10, 21, 21)]
         keep = dedupe(masks, [(t not in retired, -t) for t in ids], 0.6, overlap=mask_iou)
         self.assertEqual(sorted(ids[k] for k in keep), [2, 3, 8])
+
+
+class ReplayTests(unittest.TestCase):
+    def test_runs_preserve_settings_and_do_not_overwrite_previous_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clip = Path(directory) / 'input.mp4'
+            clip.write_bytes(b'clip bytes')
+            args = argparse.Namespace(video=str(clip), out=directory, threshold=0.4)
+            with patch('keyframe_hybrid.torch.cuda.is_available', return_value=False), \
+                    patch('keyframe_hybrid.subprocess.check_output', side_effect=['abc', '', 'abc', ' M source.py']):
+                first, _ = _create_run(args)
+                original = (first / 'environment.json').read_bytes()
+                args.threshold = 0.6
+                second, metadata = _create_run(args)
+            self.assertNotEqual(first, second)
+            self.assertEqual((first / 'environment.json').read_bytes(), original)
+            self.assertEqual(metadata['video_sha256'], hashlib.sha256(b'clip bytes').hexdigest())
+            self.assertEqual(metadata['settings']['threshold'], 0.6)
+            self.assertEqual(metadata['git_status'], ' M source.py')
+            self.assertIn('keyframe_hybrid.py', metadata['source_sha256'])
+
+    def test_replay_preserves_partial_csv_and_cleans_up_on_failure_or_interrupt(self):
+        for failure in (None, RuntimeError('inference failed'), KeyboardInterrupt()):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                clip = Path(directory) / 'input.mp4'
+                clip.write_bytes(b'clip bytes')
+                frame = np.zeros((16, 16, 3), dtype=np.uint8)
+                camera = Mock()
+                camera.isOpened.return_value = True
+                camera.get.return_value = 25.0
+                camera.read.side_effect = [(True, frame), (True, frame), (False, None)]
+                tracker, session, writer = Mock(), Mock(), Mock()
+                tracker.start_stream.return_value = session
+                tracker.track_frame.side_effect = [([], 10.0), failure or ([], 20.0)]
+                argv = ['keyframe_hybrid.py', str(clip), 'pen', '--backend', 'sam3image', '--out', directory]
+                with patch('sys.argv', argv), redirect_stdout(io.StringIO()), \
+                        patch('keyframe_hybrid.torch.cuda.is_available', return_value=False), \
+                        patch('keyframe_hybrid.subprocess.check_output', return_value='abc'), \
+                        patch('keyframe_hybrid._load_backend', return_value=tracker), \
+                        patch('cv2.VideoCapture', return_value=camera), \
+                        patch('video_runner.open_writer', return_value=writer):
+                    if failure is None:
+                        main()
+                    else:
+                        with self.assertRaises(type(failure)):
+                            main()
+                camera.release.assert_called_once()
+                writer.close.assert_called_once()
+                session.reset_inference_session.assert_called_once()
+                manifest = next(Path(directory).glob('*/environment.json'))
+                metadata = json.loads(manifest.read_text(encoding='utf-8'))
+                expected = 'completed' if failure is None else 'interrupted' if isinstance(failure, KeyboardInterrupt) else 'failed'
+                self.assertEqual(metadata['status'], expected)
+                with next(manifest.parent.glob('*.csv')).open(newline='') as f:
+                    rows = list(csv.DictReader(f))
+                self.assertEqual(len(rows), 2 if failure is None else 1)
+                self.assertEqual(metadata['frames'], len(rows))
 
 
 if __name__ == "__main__":

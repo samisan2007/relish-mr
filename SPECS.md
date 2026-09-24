@@ -2,6 +2,7 @@
 
 Living document. What we are building and the decisions that are settled.
 Update it when a decision changes, not when work happens (that's [DEVLOG.md](DEVLOG.md)).
+The ordered next steps and acceptance checks are in [PLAN.md](PLAN.md).
 
 **Status:** prototype. Nothing shipped, nothing frozen.
 
@@ -10,6 +11,21 @@ Update it when a decision changes, not when work happens (that's [DEVLOG.md](DEV
 Mixed-reality cooking assistant on Quest. The headset sees the food through
 passthrough, and the app tells the cook about portions in place, on the food,
 rather than on a screen.
+
+**The food moves, and it is in the cook's hands most of the time.** Settled;
+don't design around still food.
+- The cook kneads a meatball, shapes it, and holds it up to compare it with
+  another.
+- So the food is picked up, rolled and squeezed, and it changes shape and size
+  as it is worked. It crosses other pieces and is partly or fully hidden by the
+  hands.
+- Perception has to follow each piece, and measure it, through all of that.
+  Food sitting still on the counter is the easy case, not the main one.
+- The following do not meet this requirement:
+  - world-anchoring still food;
+  - low-rate detection;
+  - following the hand joints in place of perception.
+  Each can help, but none replaces tracking the food itself.
 
 ## Architecture
 
@@ -39,17 +55,16 @@ does the seeing.
 
 ### Open
 
-- **Tracking approach.** No final backend is chosen. Recent pen runs report
-  SAM3 fp16 at 3.8 fps, image + ByteTrack at 4.5 fps, Hybrid at 21.6 fps and
-  text YOLOE at 31.7 fps. Those runs used different frames, and neither hit
-  counts nor distinct IDs establish correct two-object tracking. Compare the
-  same recorded clip through crossing, rotation and occlusion; measurements
-  and limitations are in [temp-devlog.md](temp-devlog.md). DARTF is an optional
-  experiment with a passing synthetic translation/restart check; live tracking
-  quality still needs evaluation.
+- **Tracking approach.** No final backend is chosen. SAM3 image -> EdgeTAM is
+  the leading experiment: recorded pen clips reach roughly 9-12 frame requests/sec,
+  but motion loss, merged objects and occlusion identity remain unresolved.
+  SAM3 video is a slower quality reference and has an unresolved long-run memory
+  problem. YOLOE hybrids preserve IDs between ordinary frames but reset their
+  tracker when new exemplars are installed. They remain valid alternatives to
+  measure, not ruled out by architecture. See [DEVLOG.md](DEVLOG.md) and [PLAN.md](PLAN.md).
 - **Food-tracking acceptance target.** Aim for at least 8-10 fps with useful
-  masks and correct identities through motion, crossing and brief hand
-  occlusion. SAM 3.1's initial successful offline test reached 5.65 fps compiled
+  masks and correct identities while the food is handled (see The product): hand
+  motion, kneading and shape change, crossing, and hand occlusion. SAM 3.1's initial successful offline test reached 5.65 fps compiled
   on the RTX 5070; on the home RTX 3080 the same worker path measured 2.68 fps
   eager and 3.42 fps compiled. Live and end-to-end timings must be measured
   separately. False positives and missed food instances remain unresolved, so no
@@ -81,9 +96,13 @@ and a webcam UI that switches backends. See [temp-devlog.md](temp-devlog.md) for
 the measurements and the reasoning behind them.
 
 The webcam menu offers SAM3 video, SAM 3.1 (normal/compiled), SAM3 image + ByteTrack,
-YOLOE text, Hybrid (SAM3 seed to YOLOE), Hybrid (SAM 3.1 seed to YOLOE), and
-experimental DARTF. Either hybrid re-grounds when it loses the object, and on a
-selectable frame interval; each re-ground restarts that run's track IDs. All adapters return a per-frame
+keyframe hybrids (SAM3 image, SAM 3.1 or SAM 3.1 compiled keyframes, with
+EdgeTAM between them), YOLOE text, Hybrid (SAM3 seed to YOLOE), Hybrid (SAM 3.1
+seed to YOLOE), and experimental DARTF. Either YOLOE hybrid retries grounding
+immediately after a new loss, then waits 500 ms after each attempt while still
+lost; an optional frame interval refreshes exemplars while tracking. Installing
+fresh exemplars resets IDs; unsuccessful attempts do not. Keyframe hybrids try
+to preserve IDs by matching detections to tracks. All adapters return a per-frame
 `list[Instance]` containing a pixel mask, box, confidence and optional object ID.
 This does not yet supply Unity's world position or diameter.
 
@@ -97,7 +116,8 @@ memory, and discard memory older than 32 frames except the first conditioning
 frame per bucket. This differs from the offline demo and may affect long
 occlusions. Each run has fresh IDs, and Stop/failure closes its worker and camera,
 including during compilation. File and webcam GPU work is serialized in the UI.
-Compilation is opt-in and can take minutes on new shapes. Recorded-video
+Compilation is opt-in and covers only the detector, whose shapes are fixed. It
+costs one pause of about 20 s on frame 1 with a warm cache. Recorded-video
 results distinguish playback FPS, total processing speed and request speed after
 the first eight frames (which can still include later compilation). Webcam
 request timing includes Docker transfer but excludes capture,
@@ -117,33 +137,33 @@ recommending this backend.
 
 A separate [RTX 3080 FAST experiment](perception/dartf/RTX3080.md) prepares the
 W8A8 detector, fused mask head, lightweight tracker and frame pipeline. Its
-first test is a recorded-video run through the upstream pipeline, with separate
-headless and rendered timings plus saved IDs. It is not yet a webcam menu mode
-or a selected production backend. SM86 engine execution and tracking quality
-must be checked on the home GPU; the upstream RTX 4090 FPS claim is not a local
-performance target or guarantee.
+recorded-video test separates headless and rendered timings and saves IDs. FAST
+is also in the webcam menu. On the 3080, the repeated-dog input reached 6.35 frame
+requests/sec after the transfer fix; this is not a food-motion quality result.
+It is not a selected production backend. The upstream RTX 4090 FPS claim is not
+a local performance target or guarantee.
 
 ## Ideas to explore
 
 Survey of tools, repos and research, 2026-09-23. **None of this is decided.**
-Each item is a candidate to test, with its source. Claims are the authors' own;
-none has been measured here.
+Each item is a candidate, not an instruction to implement it. Claims from external
+sources are the authors' own. Item 11 is now partially implemented and measured on
+pen clips; follow [PLAN.md](PLAN.md) for current priorities and unresolved work.
 
-### 1. Anchor in world space and stop tracking in the image
+### 1. Use capture-time world placement to compensate for head motion
 
 This is the biggest lever, and [temp-devlog.md](temp-devlog.md) already raises
 it ("The question this test actually raises"). Tag every frame sent to the PC
 with its capture timestamp, camera pose and intrinsics. Then lift each detection
 into world space on the Quest, using the pose from *that* frame. From there:
 
-- Head motion stops being a perception problem, and network and inference
-  latency stop moving widgets, because each result is placed using its own
-  frame's pose.
-- Identity becomes nearest-match by world distance with a gate, in
-  `PortionWidgets`. Perception no longer has to supply IDs.
-- Food sitting on a counter needs perception at roughly 1-4 Hz, not 8-10.
-  The 8-10 fps target only applies to food moving in the world, such as food
-  in the cook's hands (see item 5).
+- Capture-time pose avoids placing an old detection using a newer head pose.
+  The visual tracker still sees camera motion. Food can also move during network
+  and inference delay; correct pose alone does not remove that lag.
+- World distance can help association, but nearest-position matching alone is
+  ambiguous at crossings. Preserve perception IDs and reset them per session.
+- World placement complements tracking moving food at the 8-10 fps target;
+  it does not replace perception or establish measurement accuracy.
 
 Tools already in the SDK we use:
 - MRUK `PassthroughCameraAccess` gives precise frame timestamps for
@@ -153,7 +173,9 @@ Tools already in the SDK we use:
   hit using the depth map. The CameraToWorld sample shows the pixel-to-ray
   math. [Environment raycast docs](https://developers.meta.com/horizon/documentation/unity/unity-mr-utility-kit-environment-raycast/)
 
-Metric diameter is then `diam_px · depth / focal_px`. The PC can stay purely 2D.
+`diam_px · depth / focal_px` is a starting approximation requiring valid depth,
+calibration and viewing geometry. A bounding-box side is not a reliable diameter
+of deforming or partly occluded food. The PC can initially remain purely 2D.
 
 ### 2. Reuse an existing transport instead of designing one
 
@@ -166,8 +188,8 @@ Metric diameter is then `diam_px · depth / focal_px`. The PC can stay purely 2D
   streaming, camera-to-world raycasting, object detection with 3D markers, and
   stereo UV calibration for both cameras.
 - The simplest alternative: a WebSocket carrying a JPEG plus a JSON header
-  (timestamp, pose, intrinsics). At 1-4 Hz and 640 px we don't need a video
-  codec.
+  (frame/session ID, timestamp, pose, intrinsics). Benchmark it at the handled-food
+  update rate, with a latest-frame policy, before deciding whether a codec is needed.
 
 ### 3. Faster models in the SAM3 family
 
@@ -188,7 +210,7 @@ Metric diameter is then `diam_px · depth / focal_px`. The PC can stay purely 2D
 - SAM 3.1 (March 2026) is still Meta's latest checkpoint. Nothing newer was
   found. [Meta blog](https://ai.meta.com/blog/segment-anything-model-3/)
 
-### 4. Mask trackers for moving food, only if needed
+### 4. Mask trackers for moving food
 
 These are the memory-based version of the hybrid idea. The current YOLOE hybrid
 re-detects each frame by matching an exemplar. These trackers instead propagate
@@ -206,11 +228,13 @@ the object's class.
 
 ### 5. Use hand tracking
 
-- **Reject hand and wrist false positives.** Project the Quest hand joints into
-  each frame and drop masks that overlap them. It costs no extra inference.
-- **Carry widgets while the cook holds the food.** A widget near a grasping hand
-  follows the hand's joints at the tracking rate, which covers the
-  rolling-a-meatball case without fast perception.
+- **Use hand context to investigate false positives.** Project joints into the
+  matching camera frame as association/occlusion hints. Do not reject every mask
+  overlapping a hand: the intended food is often held or partly covered by it.
+- **Use hand joints as a hint, not a replacement.** A grasping hand's joints
+  show where the food is at 90 Hz, which can steady a widget between
+  perception results. They don't give the food's shape or size, and kneading
+  changes both, so perception still has to track and measure it.
 - Research, for reference only:
   - [FoodTrack](https://arxiv.org/abs/2505.04055): portion estimation for
     handheld food from egocentric video.
@@ -385,9 +409,11 @@ Ranked by usefulness to us.
 
 ### 11. Keyframe hybrid: SAM3 finds objects, a fast tracker fills the gaps
 
-The pattern: the slow model finds objects on keyframes (2-3 Hz), a fast
+The pattern: the slow model finds objects on keyframes, a fast
 tracker carries them through the frames in between, and each new keyframe is
 matched to the existing tracks so the IDs don't restart.
+The current interval is 10 processed frames, about 1 Hz at 10 fps. A 2-3 Hz
+detector schedule is a proposed experiment, not the current measured cadence.
 
 SAM3 video already works this way inside: a detector plus a SAM2-style tracker
 with memory. Our profile found the tracker costs about 70 ms per object, 75%
@@ -395,22 +421,25 @@ of each frame (see [temp-devlog.md](temp-devlog.md)). So in practice this
 means **keeping SAM3's detector for keyframes and replacing its heavy tracker
 with a cheaper one.**
 
-What the current YOLOE hybrid lacks:
-1. **The fast half must propagate the mask, not re-detect.** YOLOE compares
-   each frame against a saved example, so it doesn't really track. The fast
-   half should carry the mask forward using memory or motion.
-2. **A re-ground must not restart the IDs.** Carry the tracks forward to the
-   keyframe's time, then match SAM3's masks to them by mask overlap
-   (Hungarian matching):
+What this experiment aims to improve over the YOLOE hybrid:
+1. **Temporal mask memory.** YOLOE detects using saved exemplars and associates
+   detections with persistent IDs. EdgeTAM propagates masks with object memory.
+   Both approaches must be judged on handled-food quality, not their names.
+2. **Identity across refreshes.** The current YOLOE exemplar refresh resets its
+   tracker. The keyframe hybrid uses greedy overlap matching, not Hungarian:
    - matched tracks are refreshed with the new mask;
    - unmatched masks become new tracks;
    - tracks that stay unmatched for a while are retired.
+
+   The current implementation matches against the previous processed frame's masks.
+   Same-time matching and bounded occluded identities are next experiments, not
+   completed guarantees. Switching to Hungarian alone cannot fix missing overlap.
 
 Candidates for the fast half:
 
 | Tracker | Where | Notes |
 |---|---|---|
-| [EdgeTAM](https://github.com/facebookresearch/EdgeTAM) (Meta, Apache 2.0) | PC, possibly Quest | Small SAM2-style tracker with memory, seeded directly with SAM3 masks. 16 fps on an iPhone 15 Pro; unmeasured on the 3080. In HF transformers. Copes with rotation and deforming food. |
+| [EdgeTAM](https://github.com/facebookresearch/EdgeTAM) (Meta, Apache 2.0) | PC | Current fast tracker. Local pen results are in DEVLOG; handled-food quality is unverified. Published mobile FPS is not our pipeline's speed. |
 | SAM2.1-tiny / [EfficientTAM](https://arxiv.org/pdf/2411.18933) | PC | Same idea, slightly larger. Fallback if EdgeTAM loses the object. |
 | Optical flow (DIS, KLT, RAFT-small) that shifts the last mask | PC or Quest | No model to train, very cheap. Fine across a 300-500 ms gap at moderate motion. Drifts with fast motion or deforming food; the next keyframe corrects it. |
 
@@ -425,10 +454,12 @@ how to recover it when it reappears:
 - [SAM-MT](https://arxiv.org/pdf/2607.08688): targets the cost growth per
   object that we measured
 
-SAM3 image mode ran at 234 ms per frame on the 5070, which leaves room for
-2-3 Hz keyframes plus EdgeTAM on the same GPU.
+SAM3 image mode ran at about 234 ms per frame on the 5070. Measure the combined
+GPU budget before raising the keyframe rate. EdgeTAM caches shared image features
+but runs memory/decoder work per object; batching is a profiled experiment in PLAN.
 
-**Could the fast tracker run on the Quest?** Technically possible, but risky:
+**Could the fast tracker run on the Quest?** Deferred research; current architecture
+keeps inference on the PC. Potential routes and unresolved risks:
 - **GPU:** Unity Inference Engine runs ONNX models on the Quest's GPU, and
   Meta ships a YOLOv9t sample. That GPU is also rendering passthrough at
   90 Hz, and Meta publishes no timings.
@@ -438,48 +469,31 @@ SAM3 image mode ran at 234 ms per frame on the 5070, which leaves room for
   officially give app developers NPU access
   ([forum](https://communityforums.atmeta.com/discussions/dev-quest/direct-access-to-quest-3s-neural-processing-unit-qualcomm-hexagon-processor-npu/1311021)),
   so treat it as unavailable until proven.
-- **Delay:** PC results arrive about 200-400 ms after capture. The Quest
-  would have to buffer frames and fast-forward each keyframe mask from its
-  capture time to now. That code is fiddly.
+- **Delay:** Quest end-to-end latency is not measured yet. Delayed masks would
+  need buffering and propagation from their capture time to the current frame.
 
-**What to put on the Quest instead needs no ML:**
-- **Food sitting still:** place each PC result using the head pose of its
-  own frame and keep the widget locked to that world point between keyframes
-  (item 1). Delay and head motion stop mattering.
-- **Food in the cook's hand:** follow the tracked hand joints (item 5).
-- **Optionally, 2D optical flow in a compute shader**, only if a mask outline
-  has to be drawn on moving food between keyframes.
+**What the Quest adds needs no ML:**
+- Place each PC result using the head pose of its own frame (item 1), avoiding
+  head-pose mismatch. Food-motion delay still needs handling.
+- Use the hand joints to steady a widget on food held in the hand between
+  results (item 5).
+
+Neither replaces the fast tracker, because the food itself moves and changes
+shape in the cook's hands (see The product).
 
 Proposed split:
 
 ```
-PC:    SAM3 / 3.1 image mode, 2–3 Hz → masks, matched to tracks by overlap (stable IDs)
-       + EdgeTAM seeded with those masks, only if masks are needed on moving food
-Quest: each result lifted into the world using its own frame's pose → widget locked in place (90 Hz)
-       food in a grasping hand → follows the hand joints
+PC:    SAM3 / 3.1 keyframes, cadence under test → masks, matched to existing tracks
+       + EdgeTAM seeded with those masks, every frame: kneaded, handled food is the main case
+Quest: each result lifted into the world using its own frame's pose
+       hand joints steady widgets on held food between results
 ```
 
-### Cheapest experiments, in order
+### Implementation order
 
-1. Run the QuestCameraKit or PCA CameraToWorld sample in our scene and raycast
-   a fixed pixel to a world point.
-2. Build pose-tagged frame transport (item 2), with SAM3 image mode on the PC
-   returning centroids and pixel diameters.
-3. Match objects by world distance in `PortionWidgets`, then test head motion
-   against a static plate.
-4. Filter out masks that overlap the projected hands.
-5. Benchmark EfficientSAM3, EOVSAM and YOLOE-26 on the same food clips. By this
-   point those can be real Quest recordings with their pose logs.
-6. Decide what a portion is, then try the VLM route before the geometry route.
-7. Prompt Gemini Robotics ER 2 (or the same VLM as step 6) on a sampled frame
-   for the current action, alongside the portion question. Score it on
-   EPFL-Smart-Kitchen's egocentric clips against their action labels.
-8. If a food noun keeps failing zero-shot, use SAM3 to pre-label about 10
-   frames from our clips, then train RF-DETR on them (the Roboflow loop).
-9. Keyframe hybrid (item 11): run SAM3 image mode at 2-3 Hz with EdgeTAM on
-   the 3080, over a clip with crossing and occlusion. Add overlap matching at
-   keyframes and check that the IDs stay stable. Only then try EdgeTAM on the
-   Quest through Unity Inference Engine.
-
-If step 3 holds up, the tracking question under **Open** reduces to food in the
-cook's hands. DARTF, the hybrids and the 8-10 fps target could then be shelved.
+Follow [PLAN.md](PLAN.md): preserve the baseline, diagnose lost objects, validate
+retry policy and live timing, then profile before batching. Collect food clips and
+build the smallest Quest loop before selecting a backend. Add alternative models
+only through bounded comparisons. World placement does not remove the handled-food
+tracking requirement or its 8-10 fps target.

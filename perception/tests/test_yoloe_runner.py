@@ -117,8 +117,13 @@ class HybridHandoffTests(unittest.TestCase):
 
     def test_empty_seed_retries_sam_without_starting_yolo(self):
         self.sam.track_frame.side_effect = [([], 1.0), ([detection()], 1.0)]
-        self.tracker.track_frame(self.session, self.rgb)
-        self.tracker.track_frame(self.session, self.rgb)
+        with patch('yoloe_runner.time.monotonic', return_value=10.0) as clock:
+            self.tracker.track_frame(self.session, self.rgb)
+            clock.return_value = 10.49
+            self.assertEqual(self.tracker.track_frame(self.session, self.rgb), ([], 0.0))
+            self.sam.track_frame.assert_called_once()
+            clock.return_value = 10.5
+            self.tracker.track_frame(self.session, self.rgb)
         self.assertEqual(self.sam.track_frame.call_count, 2)
         self.model.track.assert_not_called()
         self.tracker.track_frame(self.session, self.rgb)
@@ -190,9 +195,48 @@ class RegroundTests(unittest.TestCase):
         self.assertEqual(self.sam.track_frame.call_count, 2)  # lost last frame, don't wait
         self.assertEqual(len(self.prompted()), 2)
 
+    def test_continued_loss_waits_but_yolo_keeps_searching_and_new_loss_retries(self):
+        self.tracker.reground_every = 1  # must not defeat the lost cooldown
+        with patch('yoloe_runner.time.monotonic', return_value=10.0) as clock:
+            self.tracker.track_frame(self.session, self.rgb)  # initial seed
+            self.tracker.reground_every = 0
+            self.model.track.return_value = [yolo_result(0)]
+            self.tracker.track_frame(self.session, self.rgb)  # new loss
+            self.sam.track_frame.return_value = ([], 1.0)
+            self.tracker.track_frame(self.session, self.rgb)  # immediate retry
+            self.assertEqual(self.sam.track_frame.call_count, 2)
+            self.tracker.reground_every = 1
+            for _ in range(4):
+                self.tracker.track_frame(self.session, self.rgb)
+            self.assertEqual(self.sam.track_frame.call_count, 2)
+            self.assertEqual(self.model.track.call_count, 6)
+            clock.return_value = 10.5
+            self.tracker.track_frame(self.session, self.rgb)  # deadline reached
+            self.assertEqual(self.sam.track_frame.call_count, 3)
+            self.model.track.return_value = [yolo_result()]
+            self.tracker.track_frame(self.session, self.rgb)  # old exemplar recovers
+            self.assertFalse(self.session['lost'])
+            self.tracker.reground_every = 0
+            self.model.track.return_value = [yolo_result(0)]
+            self.tracker.track_frame(self.session, self.rgb)
+            self.tracker.track_frame(self.session, self.rgb)  # new loss bypasses cooldown
+            self.assertEqual(self.sam.track_frame.call_count, 4)
+
+    def test_slow_grounding_gets_a_full_cooldown_after_completion(self):
+        with patch('yoloe_runner.time.monotonic', return_value=10.0) as clock:
+            def slow_miss(*args):
+                clock.return_value = 12.0
+                return [], 2000.0
+            self.sam.track_frame.side_effect = slow_miss
+            self.tracker.track_frame(self.session, self.rgb)
+            clock.return_value = 12.49
+            self.tracker.track_frame(self.session, self.rgb)
+            self.sam.track_frame.assert_called_once()
+            self.assertEqual(self.session['next_ground_at'], 12.5)
+
     def test_interval_is_off_by_default_but_a_lost_track_still_regrounds(self):
-        # Re-grounding restarts YOLOE's track IDs, so the schedule is opt-in; losing
-        # every detection costs no IDs, so that trigger is not.
+        # Exemplar refresh resets IDs, so periodic refresh is opt-in. A new loss
+        # still triggers an immediate recovery attempt.
         with patch('ultralytics.YOLOE', return_value=self.model):
             tracker = HybridVideoTracker(self.sam)
         session = tracker.start_stream('object')
@@ -321,6 +365,29 @@ class WebcamSliderTests(unittest.TestCase):
         # smoke_sam31_ui.py and the SAM 3.1 tests call this with seven positional args.
         self.assertEqual(params[:7], ['prompt', 'show_masks', 'show_boxes', 'camera_index',
                                       'model_choice', 'config_name', 'run_state'])
+
+
+    def test_initial_seed_cooldown_is_visible_but_excluded_from_inference_stats(self):
+        import video_ui
+        model, seeder = Mock(), Mock()
+        seeder.track_frame.return_value = ([], 10.0)
+        with patch('ultralytics.YOLOE', return_value=model):
+            hybrid = HybridVideoTracker(seeder)
+        camera = Mock()
+        camera.isOpened.return_value = True
+        frame = np.zeros((16, 16, 3), dtype=np.uint8)
+        camera.read.side_effect = [(True, frame), (True, frame), (False, None)]
+        with patch.object(video_ui, 'get_active_tracker', return_value=(hybrid, video_ui.MODEL_HYBRID)), \
+                patch.object(video_ui.cv2, 'VideoCapture', return_value=camera), \
+                patch('yoloe_runner.time.monotonic', return_value=10.0):
+            outputs = list(video_ui.webcam_loop('pen', True, True, 0, video_ui.MODEL_HYBRID,
+                                               video_ui.DEFAULT_CONFIG.name, {}))
+        waiting = [row for row in outputs if 'Waiting to retry' in row[1]]
+        self.assertEqual(len(waiting), 1)
+        self.assertEqual(waiting[0][2]['times'], [10.0])
+        self.assertEqual(waiting[0][2]['counts'], [0])
+        model.track.assert_not_called()
+        camera.release.assert_called_once()
 
 
 if __name__ == '__main__':

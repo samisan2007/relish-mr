@@ -47,12 +47,16 @@ tracker = None  # Load on selection so Docker backends have the GPU available.
 MODEL_SAM3 = "SAM3"
 MODEL_SAM3_IMG = "SAM3 image + ByteTrack"
 MODEL_KEYFRAME = "Keyframe hybrid (SAM3 image -> EdgeTAM)"
+MODEL_KEYFRAME_31 = "Keyframe hybrid (SAM 3.1 image -> EdgeTAM)"
+MODEL_KEYFRAME_31_COMPILED = "Keyframe hybrid (SAM 3.1 compiled -> EdgeTAM)"
+KEYFRAME_31_CHOICES = [MODEL_KEYFRAME_31, MODEL_KEYFRAME_31_COMPILED]
+KEYFRAME_CHOICES = [MODEL_KEYFRAME, *KEYFRAME_31_CHOICES]
 MODEL_YOLOE = "YOLOE (text prompt)"
 MODEL_HYBRID = "Hybrid (SAM3 seed -> YOLOE track)"
 MODEL_HYBRID_31 = "Hybrid (SAM 3.1 seed -> YOLOE track)"
 MODEL_DARTF = "DARTF (native SAM3, FP16 TensorRT)"
 MODEL_DARTF_FAST = "DARTF FAST (W8A8 TensorRT)"
-MODEL_CHOICES = [MODEL_SAM3, *SAM31_CHOICES, MODEL_SAM3_IMG, MODEL_KEYFRAME, MODEL_YOLOE, MODEL_HYBRID,
+MODEL_CHOICES = [MODEL_SAM3, *SAM31_CHOICES, MODEL_SAM3_IMG, *KEYFRAME_CHOICES, MODEL_YOLOE, MODEL_HYBRID,
                  MODEL_HYBRID_31, MODEL_DARTF, MODEL_DARTF_FAST]
 # Backends whose model runs in a Docker worker: their per-frame timing includes transfer,
 # so the run summary reports request speed separately from total processing.
@@ -70,6 +74,8 @@ _hybrid31_tracker: HybridVideoTracker | None = None
 _sam3_image_tracker: Sam3ImageTracker | None = None
 # Its own SAM3 image weights (fp16, ~1.6GB) plus EdgeTAM; released like the one above.
 _keyframe_tracker = None
+# EdgeTAM only; its SAM 3.1 keyframes come from a Docker worker opened per stream.
+_keyframe31_tracker = None
 _webcam_runs = {}  # Live worker handles stay server-side, outside serializable gr.State.
 
 
@@ -96,21 +102,32 @@ def get_active_tracker(model_choice: str, config_name: str):
     """Returns (tracker, label) for whichever backend is selected. label goes in the
     status line and run log so entries stay distinguishable across backends."""
     global tracker, _yoloe_tracker, _hybrid_tracker, _hybrid31_tracker, _sam3_image_tracker
-    global _keyframe_tracker
+    global _keyframe_tracker, _keyframe31_tracker
 
-    if model_choice in SAM31_CHOICES or model_choice in (MODEL_DARTF, MODEL_DARTF_FAST, MODEL_HYBRID_31):
+    if model_choice in SAM31_CHOICES or model_choice in (
+            MODEL_DARTF, MODEL_DARTF_FAST, MODEL_HYBRID_31, *KEYFRAME_31_CHOICES):
         # These run their model inside a GPU Docker worker, so every Windows-side copy has
         # to leave the card first — otherwise the two compete for the same 12GB and the
         # driver spills to system RAM rather than failing.
         tracker = _yoloe_tracker = _hybrid_tracker = _sam3_image_tracker = _keyframe_tracker = None
         _bench_cache.clear()
-        # The 3.1 hybrid is the exception: its YOLOE half is small and is meant to sit
-        # alongside the worker, so keep it cached rather than reloading on every Start.
+        # The 3.1 hybrids are the exception: their YOLOE/EdgeTAM half is small and is
+        # meant to sit alongside the worker, so keep it cached rather than reloading.
         if model_choice != MODEL_HYBRID_31:
             _hybrid31_tracker = None
+        if model_choice not in KEYFRAME_31_CHOICES:
+            _keyframe31_tracker = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if model_choice in KEYFRAME_31_CHOICES:
+            from keyframe_hybrid import KeyframeHybridTracker
+
+            if _keyframe31_tracker is None:
+                print("Loading keyframe hybrid (EdgeTAM side; SAM 3.1 detects from its Docker worker)...")
+                _keyframe31_tracker = KeyframeHybridTracker(Sam31Runner())
+            _keyframe31_tracker.sam3 = Sam31Runner(compile_model=model_choice == MODEL_KEYFRAME_31_COMPILED)
+            return _keyframe31_tracker, model_choice
         if model_choice == MODEL_HYBRID_31:
             if _hybrid31_tracker is None:
                 print("Loading Hybrid (YOLOE side; SAM 3.1 grounds from its Docker worker)...")
@@ -144,8 +161,8 @@ def get_active_tracker(model_choice: str, config_name: str):
     # picked. Three resident copies overflow a 12GB card, and the driver then spills to
     # system RAM instead of failing — which reads as the whole app freezing. Same trade
     # as the config cache above: switching back reloads.
-    if _sam3_image_tracker is not None or _keyframe_tracker is not None:
-        _sam3_image_tracker = _keyframe_tracker = None
+    if _sam3_image_tracker is not None or _keyframe_tracker is not None or _keyframe31_tracker is not None:
+        _sam3_image_tracker = _keyframe_tracker = _keyframe31_tracker = None
         # gc.collect() before empty_cache(): the model's modules and accelerate hooks
         # form reference cycles, so dropping the name alone leaves the weights alive and
         # empty_cache() finds nothing to return. Without this the release is a no-op.
@@ -251,7 +268,7 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
         cam_tracker.reground_every = int(reground)
         if reground:
             label = f"{label} reground {int(reground)}"
-    if model_choice == MODEL_KEYFRAME:
+    if model_choice in KEYFRAME_CHOICES:
         cam_tracker.keyframe_every = int(keyframe_every)
         label = f"{label} every {int(keyframe_every)}"
 
@@ -287,7 +304,7 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
         yield None, f"Starting {label}; compiled first frames can take several minutes. Stop cancels the run.", {}
         try:
             if isinstance(cam_tracker, Sam31Runner) or model_choice in (
-                    MODEL_DARTF, MODEL_DARTF_FAST, MODEL_HYBRID_31):
+                    MODEL_DARTF, MODEL_DARTF_FAST, MODEL_HYBRID_31, *KEYFRAME_31_CHOICES):
                 session = cam_tracker.start_stream(prompt.strip(), on_started=on_started)
             else:
                 session = cam_tracker.start_stream(prompt.strip())
@@ -308,6 +325,11 @@ def webcam_loop(prompt, show_masks, show_boxes, camera_index, model_choice, conf
             except Exception as e:
                 yield None, f"Tracking failed on '{label}': {e}", run_state
                 return
+
+            if isinstance(cam_tracker, HybridVideoTracker) and ms == 0:
+                # Cooldown-only frames did no inference; exclude them from timing.
+                yield frame, f'[{label}] Waiting to retry grounding for "{prompt.strip()}".', run_state
+                continue
 
             # obj_id can be None for a detection the tracker hasn't confirmed yet — ByteTrack
             # on the SAM3-image backend, and whatever ultralytics defaults to for YOLOE/Hybrid
@@ -414,8 +436,9 @@ with gr.Blocks(title="Relish video tracker") as demo:
 | SAM3 | Text grounding with object memory; survives rotation. Warms up over ~8 frames. |
 | SAM3 image + ByteTrack | No memory — re-detects per frame, IDs by overlap. Drops IDs on fast motion. |
 | Keyframe hybrid | SAM3 image mode every N frames; EdgeTAM (a light SAM 2) carries the masks between. Keyframes match to live tracks by mask overlap, so IDs persist. Each keyframe frame is slow (~250 ms), the rest fast. |
+| Keyframe hybrid (SAM 3.1) | Same, with SAM 3.1 image mode for the keyframes, from its Docker worker. Slow to start; compiled adds minutes more. |
 | YOLOE | Fast text detection; weak on specific food nouns. |
-| Hybrid | SAM3 grounds, then YOLOE tracks; re-grounds whenever it loses every detection. |
+| Hybrid | SAM3 grounds, then YOLOE tracks; retries immediately after loss, then waits 500 ms between attempts. |
 | | YOLOE matches the seeded exemplars, not the words, so boxes far larger than them are rejected as drift. |
 | Hybrid (SAM 3.1) | Same, with SAM 3.1 grounding from its Docker worker. Slow to start, then YOLOE speed. |
 | DARTF | FP16 TensorRT + native SAM3 memory, via Docker. Needs locally built engines. |
@@ -438,7 +461,11 @@ interval sets the average rate:
 | 10 | ~9 fps | Pauses dominate |
 
 Measured directly at N=10 (9.0 fps) and N=0; the rest follow from the two frame costs.
-Each re-ground also **restarts the track IDs** — installing new exemplars rebuilds
+These tracking-phase measurements predate the lost-state cooldown. While lost,
+retries wait 500 ms after the previous attempt finishes; YOLOE keeps searching
+with its old exemplars. Before the first seed there is no YOLOE search, and
+cooldown-only frames are excluded from the inference run log.
+Successful re-grounds **restart the track IDs** — installing new exemplars rebuilds
 YOLOE's tracker — so a short interval inflates the ID count in the run log: the same
 40-frame clip logged 3 IDs at N=10 against 1 at N=30.
 """
@@ -464,7 +491,7 @@ YOLOE's tracker — so a short interval inflates the ID count in the run log: th
             )
             w_keyframe = gr.Slider(
                 1, 60, value=10, step=1,
-                label="Keyframe hybrid: run SAM3 every N frames (ignored for other models)",
+                label="Keyframe hybrids: run SAM3 / SAM 3.1 every N frames (ignored for other models)",
             )
             with gr.Row():
                 w_start = gr.Button("Start", variant="primary")
