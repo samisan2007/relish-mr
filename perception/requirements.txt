@@ -14,5 +14,6 @@ imageio
 imageio-ffmpeg
 gradio
 requests
+timm  # EdgeTAM's backbone (keyframe_hybrid.py)
 ultralytics  # YOLOE backend (yoloe_runner.py) — downloads its own weights + a ~570MB
              # MobileCLIP text encoder on first use, separate from the facebook/sam3 cache.

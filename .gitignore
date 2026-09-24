@@ -32,6 +32,7 @@ perception/sam31-local/
 
 # Generated overlays from test runs
 *_sam3.png
+perception/runs/
 
 # Unity generated files (project lives in unity/)
 /unity/[Ll]ibrary/

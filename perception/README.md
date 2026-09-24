@@ -132,6 +132,12 @@ check pass; live tracking quality still needs evaluation. See
 [DARTF setup and remaining checks](dartf/README.md). It runs full-memory SAM3
 tracking with an FP16 TensorRT detector, without the upstream W8A8 INT8 recipe.
 
+**Keyframe hybrid (SAM3 image -> EdgeTAM)** runs SAM3's image model every N
+frames (webcam slider, default 10) and lets EdgeTAM, a small SAM 2-style tracker
+with memory, carry the masks in between. Keyframe detections are matched to the
+live tracks by mask overlap, so IDs persist across keyframes instead of
+restarting. Needs `timm` (in requirements). See the 2026-09-24 DEVLOG entry.
+
 `yoloe_runner.py` adds two alternatives to SAM3, evaluated after finding SAM3
 plateaus around 1 fps at steady state regardless of config (see below):
 
@@ -283,6 +289,7 @@ real moving object (see below).
 | `track_video.py` | CLI: track a concept through a video, write an annotated `.mp4` |
 | `video_ui.py` | Gradio video tracker — "Video file" and "Webcam (live)" tabs |
 | `bench_realtime.py` | Benchmarks precision/resolution/compile configs against one captured webcam clip |
+| `keyframe_hybrid.py` | SAM3 image mode on keyframes + EdgeTAM mask tracking between them; also replays a clip through any backend (`python keyframe_hybrid.py clip.mp4 pen --backend sam3video`) |
 | `yoloe_runner.py` | YOLOE text-prompt and seeded-hybrid trackers (SAM3 or SAM 3.1 seeder) — alternatives to `Sam3VideoTracker` in the webcam tab |
 
 Work is logged in `../Documentation/devlog.md`.

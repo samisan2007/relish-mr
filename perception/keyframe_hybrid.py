@@ -1,0 +1,356 @@
+"""Keyframe hybrid: SAM3 image mode finds objects every K frames, EdgeTAM carries
+their masks through the frames in between.
+
+SAM3 video is already this shape internally (detector + SAM2-style tracker), but its
+tracker costs ~70 ms per object. Here the detector only runs on keyframes and a much
+lighter memory tracker (EdgeTAM, a distilled SAM 2) propagates masks every frame.
+
+Unlike the YOLOE hybrid, a keyframe does not restart the IDs: SAM3's masks are
+matched to the live tracks by mask IoU. A match re-seeds that track with SAM3's
+mask under the same ID; an unmatched detection starts a new track; a track SAM3
+misses on `retire_after` consecutive keyframes is retired.
+
+Same start_stream/track_frame shape as the other backends, so the webcam UI can
+swap it in. Run as a script to replay a recorded clip through it (or through the
+existing SAM3 backends, for a like-for-like comparison):
+
+    python keyframe_hybrid.py ../../Media/pen_test_vid.mp4 pen
+    python keyframe_hybrid.py ../../Media/pen_test_vid.mp4 pen --backend sam3video
+
+Writes an annotated video, a per-frame ID CSV and an ID-timeline PNG to runs/.
+"""
+
+import argparse
+import csv
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from sam3_runner import Instance, Sam3Runner
+
+EDGETAM_ID = "yonigozlan/EdgeTAM-hf"
+
+# EdgeTAM attends to the last 7 memory frames and up to 16 object pointers, so
+# older non-conditioning outputs are dead weight; keep 16. Keep the 2 newest
+# keyframe seeds per object instead of every seed since the stream began.
+KEEP_NON_COND = 16
+KEEP_COND = 2
+# Rebuild the EdgeTAM session once this many dead or retired tracks are in it.
+COMPACT_AFTER = 4
+
+
+class _Stream(dict):
+    """Per-stream state. A dict for the UI's run log, plus reset_inference_session()
+    so the webcam tab's Stop cleanup releases the EdgeTAM memory as for SAM3."""
+
+    def reset_inference_session(self):
+        self["edgetam"].reset_inference_session()
+
+
+def mask_overlap(a: np.ndarray, b: np.ndarray) -> float:
+    """Intersection over the smaller mask, not IoU. Between keyframes EdgeTAM often
+    keeps only part of a rotating pen while SAM3 returns all of it; IoU scores that
+    pair low and mints a new ID, containment scores it as the same object."""
+    smaller = min(a.sum(), b.sum())
+    return float(np.logical_and(a, b).sum() / smaller) if smaller else 0.0
+
+
+def dedupe(masks: list[np.ndarray], scores: list[float], max_overlap: float) -> list[int]:
+    """Indices of detections to keep, best first: SAM3 image mode often returns a
+    whole object and a fragment of it, and each would otherwise seed its own track."""
+    kept: list[int] = []
+    for i in sorted(range(len(masks)), key=lambda i: -scores[i]):
+        if all(mask_overlap(masks[i], masks[k]) < max_overlap for k in kept):
+            kept.append(i)
+    return kept
+
+
+def match_masks(
+    detections: list[np.ndarray], tracks: dict[int, np.ndarray], min_iou: float
+) -> tuple[dict[int, int], list[int]]:
+    """Greedy highest-overlap-first matching. Returns ({det_idx: track_id}, unmatched det_idx).
+
+    ponytail: greedy, not Hungarian; identical for a handful of well-separated objects,
+    switch to scipy's linear_sum_assignment if crowded scenes start swapping IDs.
+    """
+    pairs = sorted(
+        ((mask_overlap(d, t), di, tid) for di, d in enumerate(detections) for tid, t in tracks.items()),
+        reverse=True,
+    )
+    matched: dict[int, int] = {}
+    used_tracks: set[int] = set()
+    for iou, di, tid in pairs:
+        if iou < min_iou:
+            break
+        if di in matched or tid in used_tracks:
+            continue
+        matched[di] = tid
+        used_tracks.add(tid)
+    return matched, [di for di in range(len(detections)) if di not in matched]
+
+
+def _fix_mask_seed_scores(model) -> None:
+    """Work around a transformers EdgeTAM bug (5.16): a mask-seeded object's score
+    comes out 1-D while a propagated object's is 2-D, and forward() torch.cat's
+    them, so any frame that re-seeds some objects but not others crashes. Give the
+    mask path the decoder path's shape. Drop once fixed upstream."""
+    use_mask = model._use_mask_as_output
+
+    def patched(*args, **kwargs):
+        out = use_mask(*args, **kwargs)
+        out.object_score_logits = out.object_score_logits[..., None]
+        return out
+
+    model._use_mask_as_output = patched
+
+
+def _box(mask: np.ndarray) -> tuple[float, float, float, float]:
+    ys, xs = np.nonzero(mask)
+    return float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
+
+
+class KeyframeHybridTracker:
+    def __init__(
+        self,
+        sam3: Sam3Runner,
+        keyframe_every: int = 10,
+        threshold: float = 0.4,
+        match_iou: float = 0.3,
+        retire_after: int = 3,
+        fp16: bool = True,
+    ):
+        """keyframe_every: run SAM3 on every Nth frame (10 at 25 fps is 2.5 Hz).
+        threshold: SAM3 detection score floor for seeding or creating a track.
+        match_iou: minimum overlap (over the smaller mask) between a detection and a track.
+        retire_after: consecutive keyframes a track may go unconfirmed by SAM3."""
+        from transformers import EdgeTamVideoModel, Sam2VideoProcessor
+
+        t0 = time.perf_counter()
+        self.sam3 = sam3
+        self.model = EdgeTamVideoModel.from_pretrained(EDGETAM_ID).to(
+            "cuda" if torch.cuda.is_available() else "cpu").eval()
+        _fix_mask_seed_scores(self.model)
+        self.processor = Sam2VideoProcessor.from_pretrained(EDGETAM_ID)
+        self.keyframe_every = keyframe_every
+        self.threshold = threshold
+        self.match_iou = match_iou
+        self.retire_after = retire_after
+        self.autocast_dtype = torch.float16 if fp16 else None
+        self.load_seconds = time.perf_counter() - t0
+
+    @property
+    def device(self) -> str:
+        return str(self.model.device)
+
+    def _autocast(self):
+        return torch.autocast(
+            device_type="cuda" if torch.cuda.is_available() else "cpu",
+            dtype=self.autocast_dtype,
+            enabled=self.autocast_dtype is not None,
+        )
+
+    def start_stream(self, text: str) -> "_Stream":
+        """Fresh EdgeTAM session per stream; IDs restart at 1."""
+        session = self.processor.init_video_session(
+            inference_device=self.model.device, video_storage_device="cpu")
+        return _Stream(prompt=text, edgetam=session, frame_idx=0, next_id=1,
+                       last_masks={}, misses={}, retired=set(), last_keyframe_ms=0.0)
+
+    def track_frame(self, s: dict, frame: np.ndarray) -> tuple[list[Instance], float]:
+        """Track one RGB frame. On keyframes SAM3 runs first and its masks are
+        installed before EdgeTAM steps, so the frame's output already reflects them.
+
+        ponytail: SAM3 runs inline, so keyframes stall the stream by its latency.
+        Live use should run it on a worker and fast-forward its masks to now.
+        """
+        from PIL import Image
+
+        t0 = time.perf_counter()
+        i = s["frame_idx"]
+        sess = s["edgetam"]
+        inputs = self.processor(images=frame, device=self.model.device, return_tensors="pt")
+
+        if i % self.keyframe_every == 0:
+            with self._autocast():
+                dets = self.sam3.segment(Image.fromarray(frame), s["prompt"], self.threshold).instances
+            dets = [dets[k] for k in dedupe([d.mask for d in dets], [d.score for d in dets], 0.6)]
+            # Match against every mask EdgeTAM still follows, retired ones included:
+            # SAM3 misses thin objects on many frames, so a retirement is often wrong,
+            # and a re-detection should revive the old ID rather than mint a new one.
+            matched, unmatched = match_masks([d.mask for d in dets], s["last_masks"], self.match_iou)
+
+            seeds = {}  # track id -> mask installed on this frame
+            for di, tid in matched.items():
+                seeds[tid] = dets[di].mask
+                s["misses"][tid] = 0
+                s["retired"].discard(tid)
+            for di in unmatched:
+                seeds[s["next_id"]] = dets[di].mask
+                s["misses"][s["next_id"]] = 0
+                s["next_id"] += 1
+            for tid in set(sess.obj_ids) - set(matched.values()):
+                s["misses"][tid] = s["misses"].get(tid, 0) + 1
+                if s["misses"][tid] >= self.retire_after:
+                    s["retired"].add(tid)
+
+            # Retired and lost tracks keep costing EdgeTAM a pass per frame and the
+            # session can't drop single objects, so once enough pile up, restart the
+            # session with only the live tracks, under the same IDs.
+            if len(set(sess.obj_ids) - set(seeds)) >= COMPACT_AFTER:
+                for tid, m in s["last_masks"].items():
+                    if tid not in s["retired"]:
+                        seeds.setdefault(tid, m)
+                sess.reset_tracking_data()
+                s["misses"] = {tid: s["misses"].get(tid, 0) for tid in seeds}
+                s["retired"] = set()
+            if seeds:
+                self.processor.add_inputs_to_inference_session(
+                    sess, frame_idx=i, obj_ids=list(seeds), input_masks=list(seeds.values()),
+                    original_size=inputs.original_sizes[0])
+            s["last_keyframe_ms"] = (time.perf_counter() - t0) * 1000
+
+        instances: list[Instance] = []
+        if sess.obj_ids:  # nothing seeded yet -> nothing to propagate
+            # Explicit frame_idx: without it the session numbers frames by
+            # len(processed_frames), which _prune keeps at ~1.
+            with torch.no_grad(), self._autocast():
+                out = self.model(inference_session=sess, frame=inputs.pixel_values[0], frame_idx=i)
+            masks = self.processor.post_process_masks(
+                [out.pred_masks.float()], original_sizes=inputs.original_sizes, binarize=True)[0]
+            scores = torch.sigmoid(out.object_score_logits.float()).flatten().tolist()
+            s["last_masks"] = {}
+            for tid, m, score in zip(out.object_ids, masks[:, 0].cpu().numpy(), scores):
+                if score < 0.5 or not m.any():  # EdgeTAM's own "object absent" signal
+                    continue
+                s["last_masks"][tid] = m
+                if tid not in s["retired"]:
+                    instances.append(Instance(mask=m, box_xyxy=_box(m), score=score, obj_id=tid))
+            self._prune(sess, i)
+        else:
+            s["last_masks"] = {}
+
+        s["frame_idx"] += 1
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return instances, (time.perf_counter() - t0) * 1000
+
+    @staticmethod
+    def _prune(sess, i: int) -> None:
+        """Bound session growth: without this every frame's pixels and outputs are kept."""
+        for k in [k for k in sess.processed_frames if k < i]:
+            del sess.processed_frames[k]
+        for out in sess.output_dict_per_obj.values():
+            for k in [k for k in out["non_cond_frame_outputs"] if k < i - KEEP_NON_COND]:
+                del out["non_cond_frame_outputs"][k]
+            for k in sorted(out["cond_frame_outputs"])[:-KEEP_COND]:
+                del out["cond_frame_outputs"][k]
+
+
+# --- replay CLI ---------------------------------------------------------------
+
+def _load_backend(name: str, args):
+    if name == "hybrid":
+        sam3 = Sam3Runner(dtype=torch.float16)
+        return KeyframeHybridTracker(sam3, args.keyframe_every, args.threshold,
+                                     args.match_iou, args.retire_after, fp16=not args.fp32)
+    if name == "sam3video":
+        from video_runner import Sam3VideoTracker
+        return Sam3VideoTracker(dtype=torch.float16)
+    if name == "sam3image":
+        from sam3_runner import Sam3ImageTracker
+        return Sam3ImageTracker(Sam3Runner(dtype=torch.float16), threshold=args.threshold)
+    raise ValueError(name)
+
+
+def _timeline_png(ids_per_frame: list[list[int]], path: Path) -> None:
+    """One row per track ID, one column per frame, lit where that ID was output.
+    Fragmentation shows as many short rows; a stable track as one long one."""
+    from PIL import Image
+
+    from viz import COLORS
+
+    all_ids = sorted({i for ids in ids_per_frame for i in ids})
+    if not all_ids:
+        return
+    row = {tid: r for r, tid in enumerate(all_ids)}
+    h, rh = len(all_ids), 12
+    img = np.full((h * rh, len(ids_per_frame), 3), 30, np.uint8)
+    for x, ids in enumerate(ids_per_frame):
+        for tid in ids:
+            img[row[tid] * rh:(row[tid] + 1) * rh - 2, x] = COLORS[tid % len(COLORS)]
+    Image.fromarray(img).resize((max(len(ids_per_frame), 600), h * rh)).save(path)
+
+
+def main() -> None:
+    import cv2
+
+    from video_runner import open_writer
+    from viz import draw_instances
+    from PIL import Image
+
+    p = argparse.ArgumentParser(description="Replay a clip through a tracking backend")
+    p.add_argument("video")
+    p.add_argument("prompt")
+    p.add_argument("--backend", default="hybrid", choices=["hybrid", "sam3video", "sam3image"])
+    p.add_argument("--keyframe-every", type=int, default=10)
+    p.add_argument("--threshold", type=float, default=0.4)
+    p.add_argument("--match-iou", type=float, default=0.3)
+    p.add_argument("--retire-after", type=int, default=3)
+    p.add_argument("--fp32", action="store_true", help="hybrid: disable fp16 autocast")
+    p.add_argument("--max-frames", type=int, default=0, help="0 = whole clip")
+    p.add_argument("--out", default="runs")
+    args = p.parse_args()
+
+    video = Path(args.video)
+    tag = args.backend if args.backend != "hybrid" else f"hybrid_k{args.keyframe_every}"
+    out_dir = Path(args.out)
+    out_dir.mkdir(exist_ok=True)
+    stem = out_dir / f"{video.stem}_{tag}"
+
+    tracker = _load_backend(args.backend, args)
+    session = tracker.start_stream(args.prompt)
+    cap = cv2.VideoCapture(str(video))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    writer = open_writer(f"{stem}.mp4", fps)
+
+    ids_per_frame, ms, key_ms = [], [], []
+    with open(f"{stem}.csv", "w", newline="") as f:
+        log = csv.writer(f)
+        log.writerow(["frame", "ms", "ids"])
+        n = 0
+        while not args.max_frames or n < args.max_frames:
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            instances, t = tracker.track_frame(session, rgb)
+            ids = sorted(i.obj_id for i in instances if i.obj_id is not None)
+            ids_per_frame.append(ids)
+            ms.append(t)
+            if args.backend == "hybrid" and n % args.keyframe_every == 0:
+                key_ms.append(session["last_keyframe_ms"])
+            log.writerow([n, f"{t:.1f}", " ".join(map(str, ids))])
+            writer.append_data(np.asarray(draw_instances(Image.fromarray(rgb), instances)))
+            if n % 50 == 0:
+                print(f"frame {n:5d}  {t:6.1f} ms  ids={ids}")
+            n += 1
+    writer.close()
+    _timeline_png(ids_per_frame, Path(f"{stem}_ids.png"))
+
+    steady = ms[10:] or ms
+    distinct = sorted({i for ids in ids_per_frame for i in ids})
+    hit = sum(1 for ids in ids_per_frame if ids)
+    print(f"\n{args.backend}: {n} frames, median {np.median(steady):.1f} ms "
+          f"({1000 / np.mean(steady):.1f} fps mean throughput)")
+    if key_ms:
+        gap = [t for k, t in enumerate(ms) if k % args.keyframe_every][10:]
+        print(f"  keyframes: median {np.median(key_ms[1:] or key_ms):.0f} ms (SAM3 + seeding); "
+              f"gap frames: median {np.median(gap):.1f} ms")
+    print(f"  frames with output: {hit}/{n}; distinct IDs: {len(distinct)} {distinct}")
+    print(f"  wrote {stem}.mp4, {stem}.csv, {stem}_ids.png")
+
+
+if __name__ == "__main__":
+    main()

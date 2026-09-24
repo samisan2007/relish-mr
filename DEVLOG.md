@@ -8,6 +8,85 @@ Detailed perception measurements and tracking experiments live in
 
 ---
 
+## 2026-09-24 — Keyframe hybrid: SAM3 image + EdgeTAM, first like-for-like clip comparison
+
+Two recorded webcam clips now sit in `Media/`: `pen_test_vid.mp4` (2 pens, 658
+frames) and `pen_vid_test_x3.mp4` (up to 3 pens, 1234 frames). Both have
+crossing, rotation, hand occlusion and motion blur. They are the first fixed
+benchmark: every backend below saw the same frames, on the RTX 5070.
+
+**New backend: keyframe hybrid** ([keyframe_hybrid.py](perception/keyframe_hybrid.py)),
+SPECS item 11.
+- SAM3 image mode (fp16) runs every 10th frame. EdgeTAM, a distilled SAM 2
+  tracker with memory, carries the masks through the frames in between.
+- Keyframe detections are matched to live tracks by mask overlap, so a
+  re-detection **keeps the track's ID** instead of restarting it, which is the
+  YOLOE hybrid's flaw.
+- Also in the webcam menu, with a "run SAM3 every N frames" slider.
+- The script replays a clip through any backend, writing an annotated video, a
+  per-frame ID CSV and an ID-timeline PNG to `perception/runs/` (gitignored).
+
+| Backend | Clip 1 fps | Clip 1 IDs (2 pens) | Clip 2 fps | Clip 2 IDs (3 pens) |
+|---|---|---|---|---|
+| SAM3 video fp16 | 3.0 | 2 | 2.9 | 3 (OOM at frame 942) |
+| SAM3 image + ByteTrack | 4.4 | 47 | 4.3 | 132 |
+| **Keyframe hybrid, every 10** | **11.6** | **9** | **9.0** | **19** |
+
+Hybrid timing breakdown:
+- Keyframes take about 230 ms (SAM3 plus seeding).
+- Frames between keyframes take 60 ms on clip 1 and 95 ms on clip 2. EdgeTAM's
+  cost grows with the number of tracks.
+- SAM3 runs inline, so each keyframe stalls the stream. Running it on a worker
+  would bring the average toward the between-keyframe rate.
+
+**What the ID counts mean, checked by eye on the overlays:**
+- **SAM3 video** holds identities best, but its low count hides a failure mode:
+  at clip 1 frame 500 it merges two crossing pens into one mask.
+- **SAM3 image + ByteTrack** is unusable, as on 2026-09-10.
+- **The hybrid's remaining breaks** come from two causes:
+  - a pen disappearing fully into the hands and reappearing, which SAM3 then
+    detects as new;
+  - bursts of extra SAM3 detections, which are retired after 3 unconfirmed
+    keyframes but still consume IDs.
+
+Two fixes halved the hybrid's IDs (18 → 9 and 36 → 19) at the same speed:
+1. **Match on containment (intersection over the smaller mask), not IoU.** A
+   pen rotated from horizontal to vertical between keyframes. EdgeTAM kept only
+   its top while SAM3 returned all of it, so their IoU was low and a new ID
+   started.
+2. **Drop SAM3 duplicates before seeding.** SAM3 image mode returns a whole pen
+   plus fragments of it, and each would seed its own track.
+
+**Fixes and findings:**
+- **transformers 5.16 EdgeTAM bug, worked around in our code.** A mask-seeded
+  object's score is 1-D and a propagated object's is 2-D, and `forward()`
+  concatenates them. Any keyframe that re-seeds some tracks but not others
+  crashed.
+- **The EdgeTAM streaming session keeps every frame and output.** It is now
+  pruned to the memory the model actually reads.
+- **Dead tracks are compacted.** Once 4 or more accumulate, the session
+  restarts with only the live tracks, under the same IDs.
+- **Existing issue, not fixed: SAM3 video streaming grows GPU memory every
+  frame.** It ran out of memory at frame 942 of clip 2. The current webcam
+  SAM3 backend should hit the same limit after about 5 minutes.
+- **New dependency: `timm`**, for EdgeTAM's backbone. Added to requirements.
+- The `kernels` package is still not installed. Without it SAM3 video skips its
+  NMS and hole-filling post-processing.
+
+**Validation:** all 49 unit tests pass, 5 of them new, covering matching,
+containment and dedupe. A UI-path smoke test with real models tracked 40 clip
+frames under a single ID. Switching to another backend released the hybrid's
+1,866 MiB of VRAM.
+
+**Not yet verified:** a live webcam run of the hybrid, and any keyframe interval
+other than 10.
+
+**Next:**
+- Test the hybrid live on the webcam.
+- Try keyframe intervals of 5 and 20.
+- Consider keeping a track alive through full hand occlusion (hide it rather
+  than release its ID) so the pen keeps its ID when it reappears.
+
 ## 2026-09-22 — SAM 3.1 + YOLOE hybrid, re-grounding, and a drift guard
 
 Added **Hybrid (SAM 3.1 seed -> YOLOE track)** to the webcam menu. The hybrid's
