@@ -1,12 +1,133 @@
 # Relish — devlog
 
-Running log, newest first. One entry per session: what changed, what it means,
-what's next. For *what we're building*, see [SPECS.md](SPECS.md).
+Running log, newest first. Update after each completed batch or task, including
+intermediate batches within a session: what changed, what it means, what's next.
+For *what we're building*, see [SPECS.md](SPECS.md).
 
 Detailed perception measurements and tracking experiments live in
 [temp-devlog.md](temp-devlog.md).
 
 ---
+
+## 2026-09-24 — Candidate code and documentation checkpoint
+
+Checkpoint subject: `Prepare offline model comparisons`, branch `dartf`, author
+`samisan <samisan2007@gmail.com>`. Includes the offline harness, regression tests,
+model pins, results documentation and standing documentation-update instruction.
+The recorded validation remains 60 passing unit tests and completed GPU smokes;
+this publication batch adds no inference changes. Weights, source checkouts and
+raw run artifacts remain ignored/local. The earlier uncommitted-state notes below
+describe the handoff before this checkpoint. Next: the lost-pen diagnosis in PLAN §1.
+
+## 2026-09-24 — Context checkpoint and standing documentation instruction
+
+The user requires Markdown updates after **every completed batch or task**, even
+when more work remains. This instruction is now in `AGENTS.md`; saving context
+must not wait for a usage limit or the end of a session.
+
+**Resume state:** offline candidate preparation is complete. The entry below
+contains measured results, compatibility fixes, validation and exact run IDs;
+[the candidate guide](perception/candidates/README.md) contains setup, replay
+commands and the recording checklist. The last code validation passed 60 unit
+tests plus GPU smokes. This checkpoint changes documentation only; no new
+inference or code tests were run.
+
+**Git/artifacts:** the last committed and pushed baseline is `5f76de4` on `dartf`.
+Candidate scripts/tests and the associated documentation remain uncommitted;
+preserve them when resuming. Sources, weights, the prepared case and run outputs
+remain locally in ignored `perception/candidates-local/`, so a future code commit
+will not upload those artifacts. No candidate containers remained running after
+the completed test batch.
+
+**Next concrete batch:** annotate lost-object windows by physical identity in
+`../Media/pen_test_vid.mp4` and `../Media/pen_vid_test_x3.mp4`, preserve baseline
+replay artifacts, and identify the first loss mechanism before changing association.
+Native/HF EdgeTAM comparison through motion and reseeding follows as a separate
+experiment. Do not infer handled-food quality from the synthetic timing results.
+
+**Still open:** loss/association fixes, timestamp-paced/live timing, sustained
+memory tests, real-motion candidate quality, EV-M food vocabulary/false positives,
+new food recordings and the Quest camera-to-widget loop. No production backend
+has been selected and no candidate was integrated into the UI.
+
+## 2026-09-24 — Offline candidate preparation and GPU smokes
+
+Prepared [candidate commands](perception/candidates/README.md) for official
+EdgeTAM, SAM 2.1 tiny, Transformers EdgeTAM and EfficientSAM3 EV-M before the
+handled-food recordings and Quest are available. Sources/checkpoints are pinned,
+downloaded, and isolated in `relish-candidates:local`; inference succeeds with
+network disabled. No UI backend or production tracking policy changed.
+
+The harness freezes decoded frames and SAM3 seed proposals once, verifies their
+hashes, runs fresh tracker sessions, and preserves masks, IDs, preview videos,
+per-frame CSVs and environment manifests. Manifests include checkpoint/code hashes,
+installed packages, GPU, CUDA, image ID, settings and failure/completion state.
+Large source/checkpoint/result files stay in ignored `perception/candidates-local/`.
+The previous reviewed baseline remains `5f76de4`, already pushed on `dartf`.
+
+**Compatibility findings:**
+- Official EdgeTAM already batches ordinary propagation. Its pinned implementation
+  crashed with multiple objects at an expanded tensor's `.view(...)`. Setup applies
+  exactly one `.reshape(...)` correction; runs verify it and record it in the manifest.
+  Redundant timm pretrained initialization is skipped before strict checkpoint load.
+- The HF configuration's default construction requested online timm metadata despite
+  local model loading. It now uses the backbone configuration already packaged in
+  the pinned checkpoint. Each session receives its own ID list: resetting the HF
+  session otherwise clears the shared seeds and breaks repeat 2.
+- EV-M strictly loads EfficientViT B1 + MobileCLIP S0, context 16. Its published image
+  checkpoint is usable. Upstream's Stage-2 memory-weight release remains unchecked;
+  a ready EV-M video tracker has not been established.
+
+**Bounded smoke measurements, RTX 5070, FP16 autocast, no compilation:**
+24 frames derived from `Media/meatballs_img.jpg`, translated 0-20 pixels, then held.
+Same frame files and highest-scoring inspected seeds; case
+`20260924-112344-240729`. Two independent sessions per tracker/object count.
+Ranges below span their post-warmup means (first eight frames excluded).
+
+| Implementation | Objects | Mean request ms | Request p95 ms | Peak allocated GiB |
+|---|---:|---:|---:|---:|
+| Native EdgeTAM + reshape fix | 1 | 28.3-30.8 | 30.2-39.4 | 0.416 |
+| Transformers EdgeTAM | 1 | 28.6-32.5 | 30.3-38.4 | 0.357-0.360 |
+| Native EdgeTAM + reshape fix | 3 | 32.8-33.2 | 34.8-35.1 | 0.442-0.443 |
+| Transformers EdgeTAM | 3 | 55.2-61.3 | 62.7-70.0 | 0.374-0.377 |
+| SAM 2.1 tiny | 3 | 74.6-74.9 | 75.8-76.0 | 0.623 |
+| Native EdgeTAM + reshape fix | 10 | 69.2-74.1 | 71.8-80.0 | 0.815-0.816 |
+| Transformers EdgeTAM | 10 | 145.8-151.5 | 151.4-185.3 | 0.437 |
+
+These measure propagation plus CPU mask transfer, excluding preprocessing, seeding,
+rendering and writes. They are not hybrid FPS or capture-to-display measurements.
+Native postprocessing is disabled and full clip state retained; HF keeps current
+presence gating, seed-score correction and pruning. The runs therefore do not isolate
+batching alone. Native EdgeTAM's multi-object advantage warrants further comparison;
+its cost still increases with object count and uses more allocated GPU memory.
+The three-object final overlays were inspected and follow the translated objects.
+This tests execution, not occlusion, identity recovery, new arrivals or handled food.
+
+Tracker runs under `perception/candidates-local/runs/` (all start `20260924-`):
+`113250-985309-edgetam` (3), `113328-973534-sam21tiny` (3),
+`113952-657367-edgetam-hf` (3), `114027-527508-edgetam` (10),
+`114104-699277-edgetam-hf` (10), `114142-660253-edgetam` (1),
+`114229-422221-edgetam-hf` (1). Earlier failed runs remain for diagnosis.
+
+**EV-M image smoke:** prompt `meatball` on the same original photo. Threshold 0.4
+returned zero detections (cold 3448 ms, next request 61 ms). Threshold 0.1 returned
+12 proposals, scores 0.123-0.257 (cold 3607 ms, next two requests 73.7/73.9 ms,
+peak allocated 1.09 GiB). Visual inspection shows food coverage and a large false
+positive over the hand. Raising the threshold enough to remove that hand mask
+also removes a partially occluded meatball; do not treat threshold tuning as a
+complete quality fix. These tiny samples are not recall or accuracy estimates.
+Runs: `20260924-113035-002003-evm` and `20260924-113719-264327-evm`.
+
+**Checks:** 60 unit tests pass, including shared-input integrity, strict checkpoint
+loading and ID preservation across cleanup. PowerShell parsing and `git diff --check`
+pass. GPU runs validated two fresh sessions for all tracker implementations, with
+1/3/10-object scaling for both EdgeTAM paths. Preview encoding resizes 452x678 to
+456x680; raw masks keep source dimensions. No long-duration or Quest test was run.
+
+**Next:** annotate the existing lost-pen windows, compare native/HF masks through
+real movement and reseeding, and diagnose association separately. Keep SAM 2.1 tiny
+as the quality alternative and evaluate EV-M across more food photos before using
+it for keyframes. The recording checklist and commands are ready for new footage.
 
 ## 2026-09-24 — Ordered plan, lost-state cooldown and preserved replay results
 

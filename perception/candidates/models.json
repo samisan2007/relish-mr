@@ -1,0 +1,33 @@
+{
+  "edgetam": {
+    "source": "https://github.com/facebookresearch/EdgeTAM.git",
+    "revision": "7711e012a30a2402c4eaab637bdb00a521302c91",
+    "directory": "edgetam",
+    "checkpoint": "edgetam/checkpoints/edgetam.pt",
+    "config": "configs/edgetam.yaml"
+  },
+  "sam21tiny": {
+    "source": "https://github.com/facebookresearch/sam2.git",
+    "revision": "2b90b9f5ceec907a1c18123530e92e794ad901a4",
+    "directory": "sam2",
+    "repo_id": "facebook/sam2.1-hiera-tiny",
+    "checkpoint_revision": "de431c4043854a71d8101e17995dfe596bf101a5",
+    "filename": "sam2.1_hiera_tiny.pt",
+    "checkpoint": "weights/sam21tiny/sam2.1_hiera_tiny.pt",
+    "config": "configs/sam2.1/sam2.1_hiera_t.yaml"
+  },
+  "evm": {
+    "source": "https://github.com/SimonZeng7108/efficientsam3.git",
+    "revision": "bd0936c788fed8d51fa799437f05abd97b401b06",
+    "directory": "efficientsam3",
+    "repo_id": "Simon7108528/EfficientSAM3",
+    "checkpoint_revision": "85b05896928f974e308f889d7ccb2eefc069de98",
+    "filename": "efficientsam3_ft/efficientsam3_efficientvit.pt",
+    "checkpoint": "weights/evm/efficientsam3_ft/efficientsam3_efficientvit.pt"
+  },
+  "edgetam-hf": {
+    "repo_id": "yonigozlan/EdgeTAM-hf",
+    "checkpoint_revision": "c266ce53b3fc00f0f495b583f6a116c4e57f53bb",
+    "checkpoint": "weights/edgetam-hf"
+  }
+}

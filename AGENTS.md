@@ -19,5 +19,11 @@ the cook's hands is the primary case, including crossing and hand occlusion.
   age. Empty output, ID totals and synthetic translation are not quality metrics.
 - Run one GPU experiment at a time. Do not download models or rebuild TensorRT
   engines for routine unit checks. Engine and compile artifacts are machine-specific.
-- Record measurements and limitations in `DEVLOG.md`; update `PLAN.md` as work
-  completes. Keep settled requirements separate from research ideas.
+- After every completed batch or task, update the relevant Markdown documentation
+  immediately, even when more work remains. This is a standing user instruction;
+  do not defer it until the end of a session or until usage/context is nearly exhausted.
+- Record completed work, checks/results, limitations, artifact paths, unresolved
+  issues and the exact next step in `DEVLOG.md`; keep `PLAN.md` current. Include
+  commit/push status in handoffs so uncommitted work is not mistaken for a saved
+  Git checkpoint. Update setup READMEs when commands or prerequisites change.
+  Keep settled requirements in `SPECS.md` separate from research ideas.

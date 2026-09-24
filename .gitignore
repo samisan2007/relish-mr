@@ -23,6 +23,7 @@ Test Data/
 perception/*.ts
 perception/dartf-local/
 perception/sam31-local/
+perception/candidates-local/
 
 # Media / run outputs
 *.mp4

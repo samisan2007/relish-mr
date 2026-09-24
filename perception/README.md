@@ -3,6 +3,9 @@
 Current direction and acceptance checks: [PLAN.md](../PLAN.md).
 Requirements: [SPECS.md](../SPECS.md). Results: [DEVLOG.md](../DEVLOG.md).
 
+Offline preparation for official EdgeTAM, SAM 2.1 tiny and EfficientSAM3 EV-M:
+[candidate setup and comparison commands](candidates/README.md).
+
 Tested on Windows with Python 3.12 and an NVIDIA RTX 5070. The webcam tools use
 OpenCV's Windows DirectShow backend.
 

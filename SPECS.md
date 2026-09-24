@@ -194,9 +194,10 @@ of deforming or partly occluded food. The PC can initially remain purely 2D.
 ### 3. Faster models in the SAM3 family
 
 - [EfficientSAM3](https://github.com/SimonZeng7108/efficientsam3) (Apache-2.0):
-  - Distilled students of about 90M parameters (EV-M, RV-M, TV-M), with text
-    prompts and video tracking. Stage-3 fine-tuned weights were released in
-    June 2026.
+  - Distilled image students of about 90M parameters (EV-M, RV-M, TV-M), with text
+    prompts. Stage-3 fine-tuned weights were released in June 2026. The pinned
+    upstream README still lists Stage-2 memory-weight release as unfinished;
+    our EV-M candidate test covers image detection, not validated video tracking.
   - SAM3-LiteText keeps SAM3's vision encoder and cuts the text encoder by 88%.
   - No speed figures are published, so we'd benchmark on the 3080 and check
     that food nouns still work.
