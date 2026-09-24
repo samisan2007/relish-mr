@@ -383,6 +383,82 @@ Ranked by usefulness to us.
   accountable than personal AIs did. That might matter if two people cook
   together, but not now. Possibly the wrong link.
 
+### 11. Keyframe hybrid: SAM3 finds objects, a fast tracker fills the gaps
+
+The pattern: the slow model finds objects on keyframes (2-3 Hz), a fast
+tracker carries them through the frames in between, and each new keyframe is
+matched to the existing tracks so the IDs don't restart.
+
+SAM3 video already works this way inside: a detector plus a SAM2-style tracker
+with memory. Our profile found the tracker costs about 70 ms per object, 75%
+of each frame (see [temp-devlog.md](temp-devlog.md)). So in practice this
+means **keeping SAM3's detector for keyframes and replacing its heavy tracker
+with a cheaper one.**
+
+What the current YOLOE hybrid lacks:
+1. **The fast half must propagate the mask, not re-detect.** YOLOE compares
+   each frame against a saved example, so it doesn't really track. The fast
+   half should carry the mask forward using memory or motion.
+2. **A re-ground must not restart the IDs.** Carry the tracks forward to the
+   keyframe's time, then match SAM3's masks to them by mask overlap
+   (Hungarian matching):
+   - matched tracks are refreshed with the new mask;
+   - unmatched masks become new tracks;
+   - tracks that stay unmatched for a while are retired.
+
+Candidates for the fast half:
+
+| Tracker | Where | Notes |
+|---|---|---|
+| [EdgeTAM](https://github.com/facebookresearch/EdgeTAM) (Meta, Apache 2.0) | PC, possibly Quest | Small SAM2-style tracker with memory, seeded directly with SAM3 masks. 16 fps on an iPhone 15 Pro; unmeasured on the 3080. In HF transformers. Copes with rotation and deforming food. |
+| SAM2.1-tiny / [EfficientTAM](https://arxiv.org/pdf/2411.18933) | PC | Same idea, slightly larger. Fallback if EdgeTAM loses the object. |
+| Optical flow (DIS, KLT, RAFT-small) that shifts the last mask | PC or Quest | No model to train, very cheap. Fine across a 300-500 ms gap at moderate motion. Drifts with fast motion or deforming food; the next keyframe corrects it. |
+
+Research to borrow the matching logic from. Each is a detector-prompted SAM2
+tracker covering when to start a track, how to hold it through occlusion, and
+how to recover it when it reappears:
+- [SAMIDARE / SAM2MOT](https://arxiv.org/html/2604.22162)
+- [Seg2Track-SAM2](https://arxiv.org/html/2509.11772)
+- [LiAM-SAM](https://arxiv.org/html/2609.28078)
+- [SAMURAI](https://arxiv.org/pdf/2411.11922): adds Kalman-filter motion to
+  SAM2's memory
+- [SAM-MT](https://arxiv.org/pdf/2607.08688): targets the cost growth per
+  object that we measured
+
+SAM3 image mode ran at 234 ms per frame on the 5070, which leaves room for
+2-3 Hz keyframes plus EdgeTAM on the same GPU.
+
+**Could the fast tracker run on the Quest?** Technically possible, but risky:
+- **GPU:** Unity Inference Engine runs ONNX models on the Quest's GPU, and
+  Meta ships a YOLOv9t sample. That GPU is also rendering passthrough at
+  90 Hz, and Meta publishes no timings.
+  [Meta docs](https://developers.meta.com/horizon/documentation/unity/unity-pca-sentis/)
+- **NPU:** [Qualcomm AI Hub](https://aihub.qualcomm.com/models/edgetam) lists
+  EdgeTAM on the XR2 Gen 2, the Quest 3's chip. However, Meta doesn't
+  officially give app developers NPU access
+  ([forum](https://communityforums.atmeta.com/discussions/dev-quest/direct-access-to-quest-3s-neural-processing-unit-qualcomm-hexagon-processor-npu/1311021)),
+  so treat it as unavailable until proven.
+- **Delay:** PC results arrive about 200-400 ms after capture. The Quest
+  would have to buffer frames and fast-forward each keyframe mask from its
+  capture time to now. That code is fiddly.
+
+**What to put on the Quest instead needs no ML:**
+- **Food sitting still:** place each PC result using the head pose of its
+  own frame and keep the widget locked to that world point between keyframes
+  (item 1). Delay and head motion stop mattering.
+- **Food in the cook's hand:** follow the tracked hand joints (item 5).
+- **Optionally, 2D optical flow in a compute shader**, only if a mask outline
+  has to be drawn on moving food between keyframes.
+
+Proposed split:
+
+```
+PC:    SAM3 / 3.1 image mode, 2–3 Hz → masks, matched to tracks by overlap (stable IDs)
+       + EdgeTAM seeded with those masks, only if masks are needed on moving food
+Quest: each result lifted into the world using its own frame's pose → widget locked in place (90 Hz)
+       food in a grasping hand → follows the hand joints
+```
+
 ### Cheapest experiments, in order
 
 1. Run the QuestCameraKit or PCA CameraToWorld sample in our scene and raycast
@@ -400,6 +476,10 @@ Ranked by usefulness to us.
    EPFL-Smart-Kitchen's egocentric clips against their action labels.
 8. If a food noun keeps failing zero-shot, use SAM3 to pre-label about 10
    frames from our clips, then train RF-DETR on them (the Roboflow loop).
+9. Keyframe hybrid (item 11): run SAM3 image mode at 2-3 Hz with EdgeTAM on
+   the 3080, over a clip with crossing and occlusion. Add overlap matching at
+   keyframes and check that the IDs stay stable. Only then try EdgeTAM on the
+   Quest through Unity Inference Engine.
 
 If step 3 holds up, the tracking question under **Open** reduces to food in the
 cook's hands. DARTF, the hybrids and the 8-10 fps target could then be shelved.
