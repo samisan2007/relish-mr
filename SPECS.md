@@ -50,6 +50,11 @@ does the seeing.
   and tracker backends are under test; see [Perception side](#perception-side).
 - **The widget is decoupled from perception.** `PortionWidget` takes a world
   position and a diameter in metres and knows nothing about how they were derived.
+- **Representative evaluation footage:** `Media/play-dough_01.mp4` through
+  `_04.mp4`, recorded from Quest 3 passthrough in a kitchen. Use these first-person
+  handling/kneading recordings to test deformable-material tracking. They are a
+  proxy for handled food; real-food recognition and the live Quest loop still
+  need separate validation. Protocol/results: [play-dough evaluation](PLAYDOUGH_EVALUATION.md).
 
 ### Open
 

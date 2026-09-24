@@ -7,6 +7,246 @@ For *what we're building*, see [SPECS.md](SPECS.md); for what comes next,
 
 ---
 
+## 2026-09-24 — Play-dough matrix completed: prompts, workers, shared-seed trackers
+
+**Prompt probe 2** (`prompt_probe2.py`): 14 prompts, including `play-dough`,
+`playdough`, `clay`, `red ball` and `food`, on the four clip-2 probe frames plus
+a no-dough stove view. `red dough` is still the only prompt that finds dough on
+all four frames without firing on the stove. The product name finds nothing on
+the two darkest frames (any spelling). `food` finds the dough but also masks the
+pot and other objects on the stove. The frozen prompt stays.
+
+**Workers on pieces/return/setup** (`workers2.py`, 12 runs, all completed). A
+monitor checked device memory above 11 GB and never fired. FAST ran at
+6.1-6.5 requests/s (p95 <= 173 ms); DARTF FP16 and SAM 3.1 at 1.6-2.6.
+Spot checks: all four cover the clip-4 pieces. DARTF FP16 and SAM 3.1 recover
+the left-palm piece after the look-away that FAST and the hybrid miss. None
+masks the stove-only frames. SAM 3.1 finished the return window where SAM3
+video collapsed, but it assigns one ID to two separate places (bowl piece plus
+a fragment ~300 px away) at clip-4 frame 840, in both modes.
+
+**Shared-seed propagation** (`run.ps1 -Action Track`, 3 objects, two passes):
+native EdgeTAM 47.5-48.5 ms mean, Transformers EdgeTAM 81.0-86.7, SAM 2.1
+tiny 81.1-81.2. When a palm piece is dropped into the bowl beside the seeded bowl
+piece, **both EdgeTAM versions merge the two into the bowl object** (area about
+doubles, two components in 39-46 of 120 frames); SAM 2.1 tiny does not. All
+three lose the left-palm piece once it is set down (19-45 empty frames).
+Native and HF EdgeTAM disagree on that object (mean IoU 0.34).
+
+Full tables and caveats: [PLAYDOUGH_EVALUATION.md](PLAYDOUGH_EVALUATION.md).
+Artifacts: `perception/runs/playdough-20260924/` (`results-summary.csv`,
+`point-review.json`, `comparison-*.jpg`, `prompt2-*.jpg`, `candidate-review.jpg`,
+`candidate-agreement.json`) and `perception/candidates-local/runs/20260924-18*`.
+Spot checks are sparse assistant-placed points; nothing here is human-validated.
+
+Label sheets for human event annotation: `annotation/*.jpg` under the run folder.
+They show raw frames brightened for viewing, titled by source frame. Labels go in
+`perception/annotations/playdough-events.csv` (tracked; the format is in the
+evaluation doc).
+
+Git: this entry and the play-dough docs are committed on `experiment`, not pushed.
+Unity setting changes, `Media/` and `sept15-report.md` are left uncommitted.
+**Next:** the user annotates events (appears, hidden, visible, merge, split,
+touch) on the handling, return and pieces windows. Then
+PLAN §1 starts with the two failures seen here: pieces lost when set down, and
+touching pieces merged by EdgeTAM.
+
+## 2026-09-24 — SAM 3.1 handling replays recorded after usage-limit stop
+
+The previous session stopped at a usage limit before recording its last runs.
+Nothing was left running (GPU idle, no containers). Both SAM 3.1 runs on the
+120-frame handling window had completed:
+- normal: 1.72 warm requests/s, 580.7 ms mean, 613.8 p95, 130.7 s total;
+- compiled: 2.09 requests/s, 477.9 mean, 506.7 p95, 134.3 s total (5.45 s first request).
+
+Reran the CPU-only `summarize.py`; `results-summary.csv`, `point-review.json` and
+`comparison-handling.jpg` now include all seven handling backends. At source
+frame 1140 every backend except YOLOE covers all three selected pieces.
+
+The shared-seed case for the candidate harness was also prepared: 120 consecutive
+clip-2 frames from 1140, three seeds, checked visually on the two palm pieces
+and the bowl piece. No candidate tracker has run on it.
+
+Git: uncommitted, not pushed. **Next:** run native EdgeTAM, Transformers EdgeTAM
+and SAM 2.1 tiny on that case (one at a time), then write event-level annotations
+for the handling/return/pieces windows before any association change.
+
+## 2026-09-24 — FAST and native FP16 handling replays completed
+
+DARTF FAST completed the same 120-frame handling window on RTX 3080:
+5.95 warm requests/s, 168.1 ms mean, 167.9 p50, 180.0 p95; 53.8 seconds
+including startup and artifact IO. All three selected dough points at source
+frame 1140 are covered; a small extra mask appears beside the bowl. Its first
+output is at request index 4, distinct from wall-clock startup delay.
+
+Native DARTF FP16 also starts and completes: 1.91 requests/s, 523.2 ms mean,
+588.9 p95, 91.6 seconds total. No model rebuild/download was needed.
+Artifacts: `perception/runs/playdough-20260924/results/handling/{fast,dartf}/`.
+Git: uncommitted, not pushed. Next: finish normal/compiled SAM3.1, then shared-seed
+propagation; consolidate mask review and timing results.
+
+## 2026-09-24 — Four-window baseline batch finished
+
+All 12 baseline jobs were attempted: 11 completed; the SAM3 video return run
+was deliberately stopped for memory/latency collapse as recorded below. The
+58-frame setup window completed too (hybrid 8.51 requests/s, SAM3 video 2.92).
+`results-summary.csv` retains full mean/p50/p95, total processing and artifact
+paths for completed runs; the aborted run remains separate. All jobs used fresh
+processes, one GPU experiment at a time, revision `0023020` and existing adapters.
+
+Inspection confirms SAM3 video is an imperfect reference: its clip-4 source frame
+960 has a large background false mask. Do not use its output as ground truth.
+Saved sparse point checks also distinguish target coverage from ID assignment.
+
+Git: uncommitted, not pushed. Next: finish FAST/native FP16/SAM3.1 handling jobs,
+then run the existing native/HF EdgeTAM and SAM2.1 harness on shared visible-object
+seeds; this latter test isolates propagation and does not measure UI throughput.
+
+## 2026-09-24 — Multiple-piece baseline completed
+
+Completed the identical 120-frame clip-4 window (24–36 s) through the three
+baseline adapters. Warm requests/s: SAM3 image -> EdgeTAM **4.13**, SAM3 ->
+YOLOE **18.10**, SAM3 video **1.47**. Respective p95: 548.8/61.2/927.2 ms;
+startup/IO-inclusive totals: 45.7/22.4/94.4 s.
+
+At source frame 840 the hybrid covers the four selected dough interior points;
+YOLOE misses the held material. SAM3 video additionally produces a large
+background false mask at frame 960. Source originals and full masks remain
+available for independent review. These are sparse assistant-reviewed examples,
+not human-validated accuracy or physical identity scores. Results and limitations:
+[PLAYDOUGH_EVALUATION.md](PLAYDOUGH_EVALUATION.md).
+
+Git: uncommitted, not pushed. Next: finish setup baseline, then the four installed
+worker configurations on the same handling window; inspect and consolidate results.
+
+## 2026-09-24 — Return replay exposes SAM3 memory/latency failure
+
+Clip-3 return window: hybrid and YOLOE completed 240 requests at 8.03 and
+11.14 requests/s. Empty views affect these averages. Inspected output shows a
+hybrid miss on the left-palm piece after return. Full-frame review corrected
+the initial YOLOE cropped-preview interpretation: its false mask is at the
+far-right bowl edge on source frame 780, not the hand on frame 1020 (which has
+no output mask).
+
+Stopped only this experiment's SAM3 video Python child after 208/240 completed
+requests: device-wide GPU memory approached 11.9 GB and maximum request latency
+reached 28.5 s. This is an aborted saturation/latency experiment, not an OOM
+exception or a completed throughput score. Marked its manifest aborted and kept
+CSV, all completed raw masks and sampled JPEGs. MP4 may be unfinished after the
+forced process stop. The serial scheduler proceeds with fresh processes.
+
+Saved device sampling, engine hashes, cached model refs, Docker image IDs and
+a snapshot of perception source under `perception/runs/playdough-20260924/`.
+Git: uncommitted, not pushed. Next: finish pieces/setup baselines and the bounded
+120-frame handling tests of FAST, native FP16 and normal/compiled SAM3.1.
+
+## 2026-09-24 — Play-dough handling baseline completed
+
+Ran the same 120 frozen clip-2 frames (30–42 s, stride 3, 1024x1024,
+`red dough`) sequentially through three existing adapters on RTX 3080:
+SAM3 image -> EdgeTAM 4.83 warm requests/s (207.2 ms mean, 509.6 p95),
+SAM3 -> YOLOE 18.25 requests/s, SAM3 video FP16 2.15 requests/s
+(464.4 ms mean, 494.5 p95). Startup/IO-inclusive totals: 43.1/22.1/69.3 s.
+
+Visual inspection of retained masks shows speed/coverage tradeoffs: on source
+frame 1140 the hybrid covers both held pieces plus bowl dough, YOLOE only one
+held piece. On frame 1257 the hybrid misses one board piece; YOLOE misses the
+bowl pieces. No formal mask accuracy or identity continuity score is claimed.
+Artifacts: `perception/runs/playdough-20260924/results/handling/`, comparison
+sheet and scripts alongside; [report](PLAYDOUGH_EVALUATION.md).
+
+Git: uncommitted, not pushed. Next: finish identical return/pieces/setup windows,
+inspect disappearance/recovery, and run available worker backends sequentially.
+
+## 2026-09-24 — Play-dough prompt probe and frozen comparison
+
+Completed 16 SAM3 image requests: four prompts on four selected clip-2 frames.
+`red dough` detects visible pieces on frame 228 where `play dough`, `dough` and
+`ball` return none; `dough` also misses the palm-held pieces at frame 1142.
+Selected `red dough` before examining model outputs on clips 3/4. One duplicate
+bowl-piece proposal appears at frame 1599, so counts are not recall.
+
+Saved the probe script, raw scores/boxes and visual comparisons under
+`perception/runs/playdough-20260924/`. Defined four fixed windows (538 frames
+total) spanning setup, handling, look-away/return and multiple-piece formation;
+every third source frame, original 1024x1024. Source mappings and lossless frame
+hashes are retained. [Protocol](PLAYDOUGH_EVALUATION.md) records settings and
+timing limits. Experiment script reuses existing adapters; no product code changed.
+
+Git: uncommitted, not pushed; existing changes preserved. Next: run the baseline
+matrix sequentially, inspect masks/IDs, then compare the installed worker backends.
+
+## 2026-09-24 — Quest play-dough evaluation: footage inventory
+
+The user designated `Media/play-dough_01.mp4` through `_04.mp4` as the
+representative test footage: Quest 3 passthrough in a kitchen, with malleable
+material handled and kneaded. Inventoried all four: 7762 frames, 258.74 seconds,
+1024x1024 at approximately 30 fps. Saved source SHA256 hashes, exact rates and
+12-view contact sheets per clip under `perception/runs/playdough-20260924/`.
+
+Initial visual inspection confirms handling, deformation, multiple pieces and
+look-away/return. Recordings also include the Quest menu and a darkened view;
+baseline inference will preserve these. Protocol and inventory:
+[PLAYDOUGH_EVALUATION.md](PLAYDOUGH_EVALUATION.md).
+
+RTX 3080 12 GB confirmed; no Docker experiments running at inventory time.
+Base revision `00230209fbf277cc0eb648caf4a1b2929639eb76`; existing Markdown and
+Unity edits are preserved. This batch is uncommitted and not pushed.
+Next: finish the clip-2 prompt probe, freeze settings, run sequential matched
+replays and visually inspect the retained outputs. Pen diagnosis remains
+pending; the user has prioritized the newly supplied material footage.
+
+## 2026-09-24 — RTX 3080 resume check
+
+Synced the 3080's `perception/.venv` to `requirements.txt`. It had transformers
+5.17.0 and ultralytics 8.4.152 and no timm, so 4 replay tests failed. After
+installing the pinned versions, all 60 tests pass.
+
+**Branch correction:** the earlier entries say "pushed on `dartf`". The remote has
+no `dartf` branch. Commit `0023020` is on `origin/experiment` and `origin/main`.
+
+**Model setup on this machine:**
+- Downloaded `yonigozlan/EdgeTAM-hf` at `c266ce53`, the revision pinned in
+  `candidates/models.json`, into the HF cache. `keyframe_hybrid.py` loads the
+  unpinned default revision.
+- `run.ps1 -Action Setup` cloned the pinned sources and downloaded the pinned
+  checkpoints into `perception/candidates-local/`. It also built
+  `relish-candidates:local` (image `7dfe58abc141`) on the existing `relish-sam31:local`.
+  Under PS 5.1, `*>` redirection shows git's "Cloning into" message as a
+  NativeCommandError. The setup still exits 0.
+
+**RTX 3080 execution smoke:**
+- The case uses `Media/Screenshot 2026-08-07 121608.png`, a 1832x1365 meatball
+  tray, as a stand-in because `meatballs_img.jpg` is not on this machine.
+- 24 translated frames, prompt `meatball`, case `20260924-132528-671857`.
+- The 16 seeds all fall on meatballs. None falls on the hand.
+- Three objects per tracker, two passes each:
+
+| Implementation | Mean request ms | p95 ms | Peak GiB | Run |
+|---|---:|---:|---:|---|
+| Transformers EdgeTAM | 77.4-77.7 | 80.6-81.3 | 0.37 | `132555-272784-edgetam-hf` |
+| Native EdgeTAM + reshape fix | 48.8-59.6 | 54.1-61.9 | 0.47 | `132618-501739-edgetam` |
+| SAM 2.1 tiny | 77.7-80.6 | 85.5-87.7 | 0.65 | `132639-916662-sam21tiny` |
+
+Every run follows `20260924-` under `candidates-local/runs/`. The final native
+EdgeTAM frame keeps all three masks on their seeded meatballs.
+
+These results show that the setup runs on this GPU. They are not comparable with
+the 5070 table below: that used a 452x678 photo and a different GPU. They say
+nothing about tracking quality.
+
+**Still missing for §1:**
+- the pen clips `pen_test_vid.mp4` and `pen_vid_test_x3.mp4`. Neither
+  `relish-mr/Media/` (screenshots only) nor `../Media/` has them.
+- `perception/runs/`, which holds the baseline replays. These cannot be
+  regenerated without the clips.
+- the 5070's earlier `candidates-local/cases` and `candidates-local/runs`.
+  Those exist only on the 5070.
+
+**Git:** this entry and the PLAN branch correction are not committed.
+**Next:** copy the two pen clips (and the 5070's `perception/runs/`) here, then
+start the PLAN §1 lost-object diagnosis with a baseline replay of both clips.
+
 ## 2026-09-24 — Documentation and code cleanup
 
 Removed stale, duplicated and wrong statements before the next experiments.

@@ -5,14 +5,21 @@ Measurements and completed work: [DEVLOG.md](DEVLOG.md).
 
 ## Resume checkpoint
 
-- Done and pushed on `dartf`: baseline fixes, offline candidate preparation and
+- Done and pushed on `experiment` and `main` (`0023020`): baseline fixes, offline candidate preparation and
   a documentation cleanup. Completed work and results are in the DEVLOG.
 - Local only, not in Git: `perception/candidates-local/` (candidate weights,
   cases and runs) and `perception/runs/` (replay outputs). Preserve both.
-- Next batch: annotate physical-object loss windows in both existing pen clips
-  and preserve baseline replay results before applying association changes (§1).
-- Then compare native/HF EdgeTAM through real movement and reseeding, and measure
-  live timing separately. Food recordings and Quest integration remain pending.
+- Current batch: evaluate the four newly supplied Quest passthrough play-dough
+  clips on the RTX 3080. See [protocol and results](PLAYDOUGH_EVALUATION.md).
+  Freeze prompts/settings, compare matched replays and inspect handling/occlusion.
+- Baselines now expose missed held pieces, background false masks and SAM3 video
+  memory/latency collapse. Preserve these results before changing association.
+- The play-dough matrix is complete: all backends on all four windows, a second
+  prompt probe and the three candidate trackers on shared seeds (see DEVLOG).
+  Next: human event annotation (hidden/lost/recovered/merged/split), then §1,
+  starting with pieces lost when set down and touching pieces merged by EdgeTAM.
+- Then use observed failures to guide §1; pen clips remain absent on this machine.
+  Native/HF propagation comparisons and live Quest timing remain separate checks.
 - Keep this checkpoint current when resuming (see AGENTS.md).
 
 ## Direction
@@ -123,7 +130,10 @@ delayed masks to now. Two workers sharing one GPU can contend.
 
 ## 4. Food evaluation and the Quest loop
 
-Collect repeatable food footage before selecting a backend: kneading/shape change,
+The four `Media/play-dough_0*.mp4` Quest passthrough recordings are now the
+representative malleable-material test set. Preserve their originals and hashes;
+use clip 2 for initial prompt tuning and clips 3/4 for subsequent comparisons.
+Continue collecting real food footage before selecting a backend: kneading/shape change,
 crossing pieces, full hand occlusion, touching pieces and a plate with many portions.
 Hand-check selected masks and identities; keep separate tuning and evaluation clips.
 Pens remain regression fixtures, not the product acceptance set.
