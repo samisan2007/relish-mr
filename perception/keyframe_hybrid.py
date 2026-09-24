@@ -6,9 +6,10 @@ tracker costs ~70 ms per object. Here the detector only runs on keyframes and a 
 lighter memory tracker (EdgeTAM, a distilled SAM 2) propagates masks every frame.
 
 Unlike the YOLOE hybrid, a keyframe does not restart the IDs: SAM3's masks are
-matched to the live tracks by mask IoU. A match re-seeds that track with SAM3's
-mask under the same ID; an unmatched detection starts a new track; a track SAM3
-misses on `retire_after` consecutive keyframes is retired.
+matched to the live tracks by mask overlap. A confident match re-seeds that track
+with SAM3's mask under the same ID, a weak one only keeps it alive; an unmatched
+confident detection starts a new track; a track SAM3 gives no support on
+`retire_after` consecutive keyframes is retired (hidden, but still matchable).
 
 Same start_stream/track_frame shape as the other backends, so the webcam UI can
 swap it in. Run as a script to replay a recorded clip through it (or through the
@@ -57,12 +58,21 @@ def mask_overlap(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.logical_and(a, b).sum() / smaller) if smaller else 0.0
 
 
-def dedupe(masks: list[np.ndarray], scores: list[float], max_overlap: float) -> list[int]:
-    """Indices of detections to keep, best first: SAM3 image mode often returns a
-    whole object and a fragment of it, and each would otherwise seed its own track."""
+def mask_iou(a: np.ndarray, b: np.ndarray) -> float:
+    """Plain IoU. Unlike mask_overlap it tells one pen apart from a mask covering
+    two pens, which contains it fully but is twice its size."""
+    union = np.logical_or(a, b).sum()
+    return float(np.logical_and(a, b).sum() / union) if union else 0.0
+
+
+def dedupe(masks: list[np.ndarray], rank: list, max_overlap: float, overlap=mask_overlap) -> list[int]:
+    """Indices of masks to keep, highest rank first; a mask overlapping a kept one
+    by `max_overlap` or more is dropped. With mask_overlap, a fragment inside a
+    whole object counts: SAM3 image mode often returns both, and each would
+    otherwise seed its own track."""
     kept: list[int] = []
-    for i in sorted(range(len(masks)), key=lambda i: -scores[i]):
-        if all(mask_overlap(masks[i], masks[k]) < max_overlap for k in kept):
+    for i in sorted(range(len(masks)), key=rank.__getitem__, reverse=True):
+        if all(overlap(masks[i], masks[k]) < max_overlap for k in kept):
             kept.append(i)
     return kept
 
@@ -70,20 +80,24 @@ def dedupe(masks: list[np.ndarray], scores: list[float], max_overlap: float) -> 
 def match_masks(
     detections: list[np.ndarray], tracks: dict[int, np.ndarray], min_iou: float
 ) -> tuple[dict[int, int], list[int]]:
-    """Greedy highest-overlap-first matching. Returns ({det_idx: track_id}, unmatched det_idx).
+    """Greedy matching. Returns ({det_idx: track_id}, unmatched det_idx).
+
+    A pair qualifies on mask_overlap >= min_iou, so a partial EdgeTAM mask still
+    matches SAM3's whole object; qualifying pairs are taken highest IoU first. When
+    one track has spread over two touching pens, both detections sit fully inside
+    it, and IoU lets the other pen's own track claim its detection first.
 
     ponytail: greedy, not Hungarian; identical for a handful of well-separated objects,
     switch to scipy's linear_sum_assignment if crowded scenes start swapping IDs.
     """
     pairs = sorted(
-        ((mask_overlap(d, t), di, tid) for di, d in enumerate(detections) for tid, t in tracks.items()),
+        ((mask_iou(d, t), di, tid) for di, d in enumerate(detections) for tid, t in tracks.items()
+         if mask_overlap(d, t) >= min_iou),
         reverse=True,
     )
     matched: dict[int, int] = {}
     used_tracks: set[int] = set()
-    for iou, di, tid in pairs:
-        if iou < min_iou:
-            break
+    for _, di, tid in pairs:
         if di in matched or tid in used_tracks:
             continue
         matched[di] = tid
@@ -118,13 +132,18 @@ class KeyframeHybridTracker:
         keyframe_every: int = 10,
         threshold: float = 0.4,
         match_iou: float = 0.3,
-        retire_after: int = 3,
+        retire_after: int = 1,
+        keep_threshold: float = 0.2,
         fp16: bool = True,
     ):
         """keyframe_every: run SAM3 on every Nth frame (10 at 25 fps is 2.5 Hz).
         threshold: SAM3 detection score floor for seeding or creating a track.
         match_iou: minimum overlap (over the smaller mask) between a detection and a track.
-        retire_after: consecutive keyframes a track may go unconfirmed by SAM3."""
+        retire_after: consecutive keyframes a track may go unconfirmed by SAM3.
+        keep_threshold: lower floor at which a detection still confirms an existing
+        track. EdgeTAM can slide a track onto pen-like background (a shelf edge) at
+        high confidence; SAM3 gives such a ghost no support at all, while a real pen
+        it misses at `threshold` usually still scores above this."""
         from transformers import EdgeTamVideoModel, Sam2VideoProcessor
 
         t0 = time.perf_counter()
@@ -137,6 +156,7 @@ class KeyframeHybridTracker:
         self.threshold = threshold
         self.match_iou = match_iou
         self.retire_after = retire_after
+        self.keep_threshold = keep_threshold
         self.autocast_dtype = torch.float16 if fp16 else None
         self.load_seconds = time.perf_counter() - t0
 
@@ -174,7 +194,7 @@ class KeyframeHybridTracker:
 
         if i % self.keyframe_every == 0:
             with self._autocast():
-                dets = self.sam3.segment(Image.fromarray(frame), s["prompt"], self.threshold).instances
+                dets = self.sam3.segment(Image.fromarray(frame), s["prompt"], self.keep_threshold).instances
             dets = [dets[k] for k in dedupe([d.mask for d in dets], [d.score for d in dets], 0.6)]
             # Match against every mask EdgeTAM still follows, retired ones included:
             # SAM3 misses thin objects on many frames, so a retirement is often wrong,
@@ -183,10 +203,19 @@ class KeyframeHybridTracker:
 
             seeds = {}  # track id -> mask installed on this frame
             for di, tid in matched.items():
-                seeds[tid] = dets[di].mask
                 s["misses"][tid] = 0
                 s["retired"].discard(tid)
+                if dets[di].score < self.threshold:
+                    continue  # a weak detection vouches for the track; its mask is often poor
+                if mask_iou(s["last_masks"][tid], dets[di].mask) < 0.5:
+                    # EdgeTAM's mask disagrees with SAM3's, e.g. it spread onto a touching
+                    # pen. Drop its recent memory, or it re-spreads from that history
+                    # within a few frames of the new seed.
+                    sess.output_dict_per_obj[sess.obj_id_to_idx(tid)]["non_cond_frame_outputs"].clear()
+                seeds[tid] = dets[di].mask
             for di in unmatched:
+                if dets[di].score < self.threshold:
+                    continue
                 seeds[s["next_id"]] = dets[di].mask
                 s["misses"][s["next_id"]] = 0
                 s["next_id"] += 1
@@ -198,7 +227,7 @@ class KeyframeHybridTracker:
             # Retired and lost tracks keep costing EdgeTAM a pass per frame and the
             # session can't drop single objects, so once enough pile up, restart the
             # session with only the live tracks, under the same IDs.
-            if len(set(sess.obj_ids) - set(seeds)) >= COMPACT_AFTER:
+            if len(set(sess.obj_ids) - set(matched.values())) >= COMPACT_AFTER:
                 for tid, m in s["last_masks"].items():
                     if tid not in s["retired"]:
                         seeds.setdefault(tid, m)
@@ -220,13 +249,28 @@ class KeyframeHybridTracker:
             masks = self.processor.post_process_masks(
                 [out.pred_masks.float()], original_sizes=inputs.original_sizes, binarize=True)[0]
             scores = torch.sigmoid(out.object_score_logits.float()).flatten().tolist()
-            s["last_masks"] = {}
+            s["last_masks"], score_of = {}, {}
             for tid, m, score in zip(out.object_ids, masks[:, 0].cpu().numpy(), scores):
                 if score < 0.5 or not m.any():  # EdgeTAM's own "object absent" signal
                     continue
-                s["last_masks"][tid] = m
-                if tid not in s["retired"]:
-                    instances.append(Instance(mask=m, box_xyxy=_box(m), score=score, obj_id=tid))
+                s["last_masks"][tid], score_of[tid] = m, score
+            # Two tracks can land on one object: a keyframe mints a new ID while the old
+            # track is momentarily absent, then EdgeTAM re-finds it. Keyframe matching
+            # then alternates between the pair, so neither retires. Keep one per object,
+            # live over retired, then the older ID; the other can't be matched again.
+            # IoU, not containment: a pen's own track lies wholly inside a track that
+            # has spread over two touching pens, and must not be dropped for it.
+            # ponytail: pairwise full-res masks, box pre-check if many objects get slow.
+            ids = list(s["last_masks"])
+            keep = set(dedupe([s["last_masks"][t] for t in ids],
+                              [(t not in s["retired"], -t) for t in ids], 0.6, overlap=mask_iou))
+            for k, tid in enumerate(ids):
+                if k not in keep:
+                    del s["last_masks"][tid]
+                    s["retired"].add(tid)
+                elif tid not in s["retired"]:
+                    m = s["last_masks"][tid]
+                    instances.append(Instance(mask=m, box_xyxy=_box(m), score=score_of[tid], obj_id=tid))
             self._prune(sess, i)
         else:
             s["last_masks"] = {}
@@ -254,7 +298,8 @@ def _load_backend(name: str, args):
     if name == "hybrid":
         sam3 = Sam3Runner(dtype=torch.float16)
         return KeyframeHybridTracker(sam3, args.keyframe_every, args.threshold,
-                                     args.match_iou, args.retire_after, fp16=not args.fp32)
+                                     args.match_iou, args.retire_after, args.keep_threshold,
+                                     fp16=not args.fp32)
     if name == "sam3video":
         from video_runner import Sam3VideoTracker
         return Sam3VideoTracker(dtype=torch.float16)
@@ -297,7 +342,9 @@ def main() -> None:
     p.add_argument("--keyframe-every", type=int, default=10)
     p.add_argument("--threshold", type=float, default=0.4)
     p.add_argument("--match-iou", type=float, default=0.3)
-    p.add_argument("--retire-after", type=int, default=3)
+    p.add_argument("--retire-after", type=int, default=1)
+    p.add_argument("--keep-threshold", type=float, default=0.2,
+                   help="hybrid: SAM3 score that still confirms an existing track")
     p.add_argument("--fp32", action="store_true", help="hybrid: disable fp16 autocast")
     p.add_argument("--max-frames", type=int, default=0, help="0 = whole clip")
     p.add_argument("--out", default="runs")

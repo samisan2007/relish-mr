@@ -136,7 +136,14 @@ tracking with an FP16 TensorRT detector, without the upstream W8A8 INT8 recipe.
 frames (webcam slider, default 10) and lets EdgeTAM, a small SAM 2-style tracker
 with memory, carry the masks in between. Keyframe detections are matched to the
 live tracks by mask overlap, so IDs persist across keyframes instead of
-restarting. Needs `timm` (in requirements). See the 2026-09-24 DEVLOG entry.
+restarting.
+- Tracks that land on the same object are reduced to one.
+- A track that SAM3 gives no support at a keyframe is hidden. Detections from 0.2
+  count as support; only detections of 0.4 or more start or re-seed a track.
+- Speed falls with each tracked object, because EdgeTAM runs one pass per track
+  per frame. With nothing tracked, it is skipped.
+
+Needs `timm` (in requirements). See the 2026-09-24 DEVLOG entries.
 
 `yoloe_runner.py` adds two alternatives to SAM3, evaluated after finding SAM3
 plateaus around 1 fps at steady state regardless of config (see below):

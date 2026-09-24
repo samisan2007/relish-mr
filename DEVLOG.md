@@ -8,6 +8,97 @@ Detailed perception measurements and tracking experiments live in
 
 ---
 
+## 2026-09-24 — Keyframe hybrid live: double IDs, merged pens and ghost tracks
+
+The first webcam run of the keyframe hybrid showed three tracking failures. All
+three came from the tracker's bookkeeping, not from the models, and all are
+fixed in [keyframe_hybrid.py](perception/keyframe_hybrid.py).
+
+**Live fps depends on what is in view, in opposite ways for the two hybrids:**
+- **YOLOE hybrids (SAM3 or SAM 3.1 seed):** about 33 fps while tracking, 8-10
+  fps with nothing in view. Once YOLOE loses everything, the seeder re-grounds
+  on every frame until it finds something again. This is deliberate, for the
+  fastest re-detection; running the seeder less often while lost is an option.
+- **Keyframe hybrid:** about 43 fps with nothing in view, about 12 fps with two
+  pens. With no tracks, EdgeTAM is skipped. With tracks, it runs one pass per
+  object per frame, because transformers loops over objects one at a time.
+  - That costs about 25-35 ms per track on the clips.
+  - A 13-meatball plate would then take about 350 ms per frame. That figure is
+    extrapolated, not measured.
+- So live runs only compare on the same content. Use the recorded clips.
+
+**1. One pen, two IDs.** Nothing compared tracks against each other.
+- How it happened:
+  - A keyframe started a new track while the pen's old track was briefly lost.
+  - EdgeTAM then found the old track again, so both sat on the same pen.
+  - Each keyframe then gave SAM3's single detection to one of the two. When
+    the winner alternated, neither was ever retired.
+- Now, every frame, tracks whose masks nearly coincide (IoU ≥ 0.6) are
+  reduced to one: a live track over a retired one, then the older ID.
+  - The dropped track can't be matched again, and the next compaction removes it.
+- A same-pen duplicate had been shown on 140 of 658 frames of clip 1 and 726 of
+  1234 of clip 2. Now it is 1 and 5.
+- The earlier ID counts (9 and 19) were low partly because the duplicate tracks
+  absorbed re-detections that would otherwise have started new IDs.
+
+**2. Two touching pens as one track.** When one hand holds both pens, EdgeTAM
+spreads one track over both.
+- **The first version of fix 1 made this worse.** It detected duplicates by
+  containment, so it removed the second pen's own track, which lies inside the
+  spread one. It now uses IoU.
+- **Matching:** a pair still needs containment ≥ 0.3, for the rotating-pen case
+  above. Pairs are now taken in IoU order, so each pen's own track claims its
+  detection first. The spread track is re-seeded with the remaining pen.
+- **Memory reset:** if SAM3's mask disagrees with a re-seeded track's EdgeTAM
+  mask (IoU < 0.5), that track's recent memory is cleared. Otherwise it spreads
+  again from its two-pen history within a few frames.
+
+**3. Ghost tracks.** After a pen moves, EdgeTAM can hold a track on pen-like
+background, such as a shelf edge, at 0.99 confidence. Such a track stayed
+visible until SAM3 had missed it on 3 keyframes (30 frames). Now:
+- SAM3 reports detections down to 0.2 (`keep_threshold`).
+- Only detections of 0.4 or more start or re-seed a track.
+- Detections from 0.2 to 0.4 only confirm an existing track.
+- A track with no support at all is hidden at that keyframe (`retire_after`
+  3 → 1).
+- A hidden track can still be matched, so a pen that SAM3 misses once comes
+  back under its own ID.
+
+Clip 2 (3 pens, 1234 frames), before and after fixes 2 and 3. Merged and ghost
+tracks are counted on the frame before each keyframe, against SAM3's
+detections on it:
+
+| | Before | After |
+|---|---|---|
+| Tracks covering two separate pens | 3 | 2 |
+| Ghost tracks (no SAM3 detection ≥ 0.2) | 21 | 16 |
+| Distinct IDs | 23 | 20 |
+| fps | 9.5 | 10.8 |
+
+- On clip 1, ghosts went from 10 to 8 and IDs from 7 to 9, at 12 fps both times.
+- Duplicate frames stayed at 0 on both clips.
+- The clips rarely show two pens held together, so they cannot confirm the
+  merge fix. The live test is that check.
+- Some counted ghosts may be real pens that SAM3 missed entirely. They were not
+  checked by eye.
+
+**Found, not fixed: SAM3 sometimes returns one mask covering two touching pens.**
+This happened on 5 keyframes of clip 2. Once, the two-pen mask scored above both
+single pens and started a track. Preferring the separate masks would also split
+a pen that SAM3 returns as a whole plus two fragments, so measure how often
+that happens first.
+
+**Validation:** all 52 unit tests pass, 3 of them new: duplicate ranking,
+matching a spread track, and the IoU dedupe. The CLI replay runs with the new
+`--keep-threshold` flag.
+
+**Not yet verified:** a live webcam run with these fixes.
+
+**Next:**
+- Test live with both pens in one hand.
+- Decide how to handle SAM3's two-pen masks.
+- Run SAM3 keyframes on a worker so they stop stalling the stream.
+
 ## 2026-09-24 — Keyframe hybrid: SAM3 image + EdgeTAM, first like-for-like clip comparison
 
 Two recorded webcam clips now sit in `Media/`: `pen_test_vid.mp4` (2 pens, 658
