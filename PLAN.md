@@ -1,26 +1,14 @@
 # Relish — next steps
 
-Updated 2026-09-24. Requirements: [SPECS.md](SPECS.md).
+Updated 2026-09-25. Requirements: [SPECS.md](SPECS.md).
 Measurements and completed work: [DEVLOG.md](DEVLOG.md).
 
 ## Resume checkpoint
 
-- Done and pushed on `experiment` and `main` (`0023020`): baseline fixes, offline candidate preparation and
-  a documentation cleanup. Completed work and results are in the DEVLOG.
-- Local only, not in Git: `perception/candidates-local/` (candidate weights,
-  cases and runs) and `perception/runs/` (replay outputs). Preserve both.
-- Current batch: evaluate the four newly supplied Quest passthrough play-dough
-  clips on the RTX 3080. See [protocol and results](PLAYDOUGH_EVALUATION.md).
-  Freeze prompts/settings, compare matched replays and inspect handling/occlusion.
-- Baselines now expose missed held pieces, background false masks and SAM3 video
-  memory/latency collapse. Preserve these results before changing association.
-- The play-dough matrix is complete: all backends on all four windows, a second
-  prompt probe and the three candidate trackers on shared seeds (see DEVLOG).
-  Next: human event annotation (hidden/lost/recovered/merged/split), then §1,
-  starting with pieces lost when set down and touching pieces merged by EdgeTAM.
-- Then use observed failures to guide §1; pen clips remain absent on this machine.
-  Native/HF propagation comparisons and live Quest timing remain separate checks.
-- Keep this checkpoint current when resuming (see AGENTS.md).
+- The Quest play-dough matrix is complete on the RTX 3080 and repeated on this RTX 5070. Read the [3080 evaluation](PLAYDOUGH_EVALUATION.md) and [5070 replay report](PLAYDOUGH_5070.md) before changing a backend. The 5070 still misses held dough, merges touching pieces and cannot complete SAM3 video's return window within the observed memory budget.
+- Local only: `perception/runs/playdough-5070-20260925/` has frozen replays, masks, overlays, timing summaries and prompt scores. `perception/candidates-local/` has the 5070 shared-seed case and tracker outputs. Preserve them; neither is in Git.
+- Next: human event annotation in `perception/annotations/playdough-events.csv` for loss, return, touching and split events. Then test section 1 changes against the frozen 3080/5070 failures. The second pen clip is still absent here; `pen_test_vid.mp4` is available as a regression fixture.
+- Keep this checkpoint current when resuming (see AGENTS.md). The 5070 report and replay script are committed and pushed on `experiment`.
 
 ## Direction
 

@@ -7,6 +7,12 @@ For *what we're building*, see [SPECS.md](SPECS.md); for what comes next,
 
 ---
 
+## 2026-09-25 - Quest play-dough replay on RTX 5070
+
+Repeated the frozen four Quest windows through six available backends, the 14-prompt probe, and the 120-consecutive-frame three-tracker candidate case. See [5070 report](PLAYDOUGH_5070.md) for the full matrix, visual review and artifact paths. The leading hybrid reached 6.57 requests/s on handling and 5.61 on multiple pieces, versus 4.83 and 4.13 on the RTX 3080, but still missed the returned left-palm piece. YOLOE was faster (24.45/26.08) but missed held dough and fired on a stove-only frame. Native EdgeTAM propagation was faster (36 ms versus 47-48 ms on 3080) while repeating the bowl-piece merge. SAM3 video was stopped preventively after 151/240 return requests at 11,710 MB sampled device use; no 5070 latency collapse was measured. RTX 3080-only DARTF FAST was unavailable here. All 60 regression tests pass.
+
+Artifacts are local under `perception/runs/playdough-5070-20260925/` and `perception/candidates-local/`. Next: human event labels for physical pieces, then test association/occlusion changes on these frozen windows. No live Quest latency was measured. Git: the report and replay script are committed and pushed on `experiment`; see the branch history for the commit.
+
 ## 2026-09-24 — Play-dough matrix completed: prompts, workers, shared-seed trackers
 
 **Prompt probe 2** (`prompt_probe2.py`): 14 prompts, including `play-dough`,
